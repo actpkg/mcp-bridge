@@ -120,6 +120,8 @@ pub async fn initialize(config: &Config) -> Result<(), McpError> {
     Ok(())
 }
 
+const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
 /// Low-level HTTP POST using wasi:http.
 async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpError> {
     let uri: Uri = config
@@ -185,13 +187,7 @@ async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpErr
         .await
         .map_err(|e| McpError::internal(format!("HTTP error: {e:?}")))?;
 
-    // Check status code
     let status = response.get_status_code();
-    if !(200..300).contains(&status) {
-        return Err(McpError::internal(format!(
-            "HTTP {status} from MCP server"
-        )));
-    }
 
     // Read response body
     let (_, result_reader) = wasip3::wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
@@ -204,11 +200,21 @@ async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpErr
         match result {
             wasip3::wit_bindgen::StreamResult::Complete(_) => {
                 all_bytes.extend_from_slice(&chunk);
+                if all_bytes.len() > MAX_RESPONSE_BYTES {
+                    return Err(McpError::internal("MCP response too large"));
+                }
                 read_buf = Vec::with_capacity(16384);
             }
             wasip3::wit_bindgen::StreamResult::Dropped
             | wasip3::wit_bindgen::StreamResult::Cancelled => break,
         }
+    }
+
+    if !(200..300).contains(&status) {
+        let detail = String::from_utf8_lossy(&all_bytes);
+        return Err(McpError::internal(format!(
+            "HTTP {status} from MCP server: {detail}"
+        )));
     }
 
     Ok(all_bytes)
