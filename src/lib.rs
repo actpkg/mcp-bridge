@@ -40,7 +40,14 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
             description: LocalizedString::Plain(
                 "Proxies a remote MCP server's tools as ACT tools".to_string(),
             ),
-            capabilities: vec![],
+            capabilities: vec![Capability {
+                id: "wasi:http/outgoing-handler".to_string(),
+                required: true,
+                description: Some(LocalizedString::Plain(
+                    "HTTP client for connecting to MCP servers".to_string(),
+                )),
+                metadata: vec![],
+            }],
             metadata: vec![],
         }
     }

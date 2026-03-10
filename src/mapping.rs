@@ -95,7 +95,9 @@ pub fn mcp_result_to_events(result: &serde_json::Value) -> Vec<StreamEvent> {
             }
             "image" => {
                 let data_str = item.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                let data = BASE64.decode(data_str).unwrap_or_default();
+                let Ok(data) = BASE64.decode(data_str) else {
+                    continue;
+                };
                 let mime_type = item
                     .get("mimeType")
                     .and_then(|m| m.as_str())
