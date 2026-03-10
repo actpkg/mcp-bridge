@@ -12,6 +12,7 @@ schemars = "1"
 ciborium = "0.2"
 base64 = "0.22"
 act-types = { path = "../../act-types" }
+http = "1"
 
 [lib]
 crate-type = ["cdylib"]
