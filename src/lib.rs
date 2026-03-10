@@ -6,17 +6,38 @@ wit_bindgen::generate!({
     world: "act-world",
 });
 
+use act::core::types::*;
+use act_types::cbor;
+
 struct McpBridge;
 
 export!(McpBridge);
 
+/// Helper: create a response stream from events.
+fn respond(events: Vec<StreamEvent>) -> wit_bindgen::rt::async_support::StreamReader<StreamEvent> {
+    let (mut writer, reader) = wit_stream::new::<StreamEvent>();
+    wit_bindgen::spawn(async move {
+        writer.write_all(events).await;
+    });
+    reader
+}
+
+/// Helper: create a ToolError from McpError.
+fn to_tool_error(e: &mcp_client::McpError) -> ToolError {
+    ToolError {
+        kind: e.kind.clone(),
+        message: LocalizedString::Plain(e.message.clone()),
+        metadata: vec![],
+    }
+}
+
 impl exports::act::core::tool_provider::Guest for McpBridge {
-    fn get_info() -> act::core::types::ComponentInfo {
-        act::core::types::ComponentInfo {
+    fn get_info() -> ComponentInfo {
+        ComponentInfo {
             name: "mcp-bridge".to_string(),
             version: "0.1.0".to_string(),
             default_language: "en".to_string(),
-            description: act::core::types::LocalizedString::Plain(
+            description: LocalizedString::Plain(
                 "Proxies a remote MCP server's tools as ACT tools".to_string(),
             ),
             capabilities: vec![],
@@ -30,22 +51,76 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
     }
 
     async fn list_tools(
-        _config: Option<Vec<u8>>,
-    ) -> Result<act::core::types::ListToolsResponse, act::core::types::ToolError> {
-        Ok(act::core::types::ListToolsResponse {
+        config: Option<Vec<u8>>,
+    ) -> Result<ListToolsResponse, ToolError> {
+        let config = mcp_client::parse_config(config.as_deref())
+            .map_err(|e| to_tool_error(&e))?;
+
+        mcp_client::initialize(&config).await
+            .map_err(|e| to_tool_error(&e))?;
+
+        let result = mcp_client::mcp_request(&config, "tools/list", serde_json::json!({}))
+            .await
+            .map_err(|e| to_tool_error(&e))?;
+
+        let mcp_tools = result.get("tools")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let tools: Vec<ToolDefinition> = mcp_tools
+            .iter()
+            .filter_map(mapping::mcp_tool_to_act)
+            .collect();
+
+        Ok(ListToolsResponse {
             metadata: vec![],
-            tools: vec![],
+            tools,
         })
     }
 
     async fn call_tool(
-        _config: Option<Vec<u8>>,
-        _call: act::core::types::ToolCall,
-    ) -> act::core::types::CallResponse {
-        let (_writer, reader) = wit_stream::new::<act::core::types::StreamEvent>();
-        act::core::types::CallResponse {
+        config: Option<Vec<u8>>,
+        call: ToolCall,
+    ) -> CallResponse {
+        let events = match call_tool_inner(config, call).await {
+            Ok(events) => events,
+            Err(e) => vec![StreamEvent::Error(to_tool_error(&e))],
+        };
+
+        CallResponse {
             metadata: vec![],
-            body: reader,
+            body: respond(events),
         }
     }
+}
+
+async fn call_tool_inner(
+    config: Option<Vec<u8>>,
+    call: ToolCall,
+) -> Result<Vec<StreamEvent>, mcp_client::McpError> {
+    let config = mcp_client::parse_config(config.as_deref())?;
+
+    mcp_client::initialize(&config).await?;
+
+    // Decode arguments from dCBOR to JSON
+    let arguments: serde_json::Value = if call.arguments.is_empty() {
+        serde_json::json!({})
+    } else {
+        cbor::cbor_to_json(&call.arguments)
+            .map_err(|e| mcp_client::McpError::invalid_args(
+                format!("Failed to decode arguments: {e}")
+            ))?
+    };
+
+    let result = mcp_client::mcp_request(
+        &config,
+        "tools/call",
+        serde_json::json!({
+            "name": call.name,
+            "arguments": arguments,
+        }),
+    ).await?;
+
+    Ok(mapping::mcp_result_to_events(&result))
 }
