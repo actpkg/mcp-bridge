@@ -3,7 +3,8 @@ mod mapping;
 
 wit_bindgen::generate!({
     path: "wit",
-    world: "act-world",
+    world: "component-world",
+    generate_all,
 });
 
 use act::core::types::*;
