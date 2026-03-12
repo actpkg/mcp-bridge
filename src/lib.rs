@@ -90,16 +90,13 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
     async fn call_tool(
         config: Option<Vec<u8>>,
         call: ToolCall,
-    ) -> CallResponse {
+    ) -> wit_bindgen::rt::async_support::StreamReader<StreamEvent> {
         let events = match call_tool_inner(config, call).await {
             Ok(events) => events,
             Err(e) => vec![StreamEvent::Error(to_tool_error(&e))],
         };
 
-        CallResponse {
-            metadata: vec![],
-            body: respond(events),
-        }
+        respond(events)
     }
 }
 
