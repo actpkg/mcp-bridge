@@ -71,14 +71,17 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
             .await
             .map_err(|e| to_tool_error(&e))?;
 
-        let mcp_tools = result.get("tools")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let list_result: act_types::mcp::ListToolsResult = serde_json::from_value(result)
+            .map_err(|e| ToolError {
+                kind: act_types::constants::ERR_INTERNAL.to_string(),
+                message: LocalizedString::Plain(format!("Failed to parse tools/list response: {e}")),
+                metadata: vec![],
+            })?;
 
-        let tools: Vec<ToolDefinition> = mcp_tools
+        let tools: Vec<ToolDefinition> = list_result
+            .tools
             .iter()
-            .filter_map(mapping::mcp_tool_to_act)
+            .map(mapping::mcp_tool_to_act)
             .collect();
 
         Ok(ListToolsResponse {
@@ -118,14 +121,21 @@ async fn call_tool_inner(
             ))?
     };
 
+    let params = act_types::mcp::CallToolParams {
+        name: call.name,
+        arguments: Some(arguments),
+    };
+
     let result = mcp_client::mcp_request(
         &config,
         "tools/call",
-        serde_json::json!({
-            "name": call.name,
-            "arguments": arguments,
-        }),
+        serde_json::to_value(&params).unwrap(),
     ).await?;
 
-    Ok(mapping::mcp_result_to_events(&result))
+    let call_result: act_types::mcp::CallToolResult = serde_json::from_value(result)
+        .map_err(|e| mcp_client::McpError::internal(
+            format!("Failed to parse tools/call response: {e}")
+        ))?;
+
+    Ok(mapping::mcp_result_to_events(&call_result))
 }
