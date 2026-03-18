@@ -1,5 +1,5 @@
-GET {{host}}/info
+GET {{baseurl}}/info
 HTTP 200
 [Asserts]
-jsonpath "$.name" == "mcp-bridge"
-jsonpath "$.version" isString
+jsonpath "$['std:name']" == "mcp-bridge"
+jsonpath "$['std:version']" isString

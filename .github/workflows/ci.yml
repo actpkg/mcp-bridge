@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly
+          targets: wasm32-wasip2
+          bins: wit-deps-cli, just
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: just init
+      - run: just build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: component.wasm
+          path: target/wasm32-wasip2/release/*.wasm
+
+  e2e:
+    name: E2E Test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: component.wasm
+          path: target/wasm32-wasip2/release/
+      - uses: actcore/act-cli/setup@main
+      - uses: moonrepo/setup-rust@v1
+        with:
+          bins: just, hurl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: just test
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly
+          targets: wasm32-wasip2
+          components: clippy
+          bins: wit-deps-cli
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: wit-deps
+      - run: cargo clippy --target wasm32-wasip2 -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: moonrepo/setup-rust@v1
+        with:
+          channel: nightly
+          components: rustfmt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo fmt -- --check

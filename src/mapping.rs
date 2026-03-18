@@ -11,9 +11,7 @@ use act_types::mcp::{CallToolResult, ContentItem};
 
 /// Convert an MCP tool definition to an ACT `ToolDefinition`.
 pub fn mcp_tool_to_act(tool: &act_types::mcp::ToolDefinition) -> ToolDefinition {
-    let description = LocalizedString::Plain(
-        tool.description.clone().unwrap_or_default(),
-    );
+    let description = LocalizedString::Plain(tool.description.clone().unwrap_or_default());
 
     let parameters_schema = serde_json::to_string(&tool.input_schema)
         .unwrap_or_else(|_| r#"{"type":"object"}"#.to_string());
@@ -131,7 +129,9 @@ mod tests {
         };
         let def = mcp_tool_to_act(&tool);
         assert_eq!(def.name, "get_weather");
-        assert!(matches!(def.description, LocalizedString::Plain(ref s) if s == "Get current weather"));
+        assert!(
+            matches!(def.description, LocalizedString::Plain(ref s) if s == "Get current weather")
+        );
         assert!(def.parameters_schema.contains("\"type\":\"object\""));
         assert!(def.metadata.is_empty());
     }
@@ -199,7 +199,9 @@ mod tests {
         match &events[0] {
             StreamEvent::Error(e) => {
                 assert_eq!(e.kind, ERR_INTERNAL);
-                assert!(matches!(&e.message, LocalizedString::Plain(s) if s == "Something went wrong"));
+                assert!(
+                    matches!(&e.message, LocalizedString::Plain(s) if s == "Something went wrong")
+                );
             }
             _ => panic!("expected error event"),
         }

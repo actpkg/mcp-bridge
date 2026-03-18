@@ -46,11 +46,25 @@ impl std::fmt::Display for McpError {
     }
 }
 
-/// Parse config from dCBOR bytes.
-pub fn parse_config(config: Option<&[u8]>) -> Result<Config, McpError> {
-    let bytes = config.ok_or_else(|| McpError::invalid_args("Config is required"))?;
-    act_types::cbor::from_cbor(bytes)
-        .map_err(|e| McpError::invalid_args(format!("Invalid config: {e}")))
+/// Extract Config from metadata key-value pairs.
+/// Each value is CBOR-encoded.
+pub fn parse_config_from_metadata(metadata: &[(String, Vec<u8>)]) -> Result<Config, McpError> {
+    let url = metadata
+        .iter()
+        .find(|(k, _)| k == "url")
+        .map(|(_, v)| act_types::cbor::from_cbor::<String>(v))
+        .transpose()
+        .map_err(|e| McpError::invalid_args(format!("Invalid url in metadata: {e}")))?
+        .ok_or_else(|| McpError::invalid_args("Missing 'url' in metadata"))?;
+
+    let auth_token = metadata
+        .iter()
+        .find(|(k, _)| k == "auth_token")
+        .map(|(_, v)| act_types::cbor::from_cbor::<String>(v))
+        .transpose()
+        .map_err(|e| McpError::invalid_args(format!("Invalid auth_token in metadata: {e}")))?;
+
+    Ok(Config { url, auth_token })
 }
 
 /// Send a JSON-RPC 2.0 request to the MCP server and return the result.
@@ -135,7 +149,7 @@ async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpErr
         Some(other) => {
             return Err(McpError::invalid_args(format!(
                 "Unsupported scheme: {other}"
-            )))
+            )));
         }
         None => return Err(McpError::invalid_args("Missing scheme in URL")),
     };
@@ -151,8 +165,8 @@ async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpErr
             format!("Bearer {token}").into_bytes(),
         ));
     }
-    let headers =
-        Fields::from_list(&header_list).map_err(|e| McpError::internal(format!("Headers error: {e:?}")))?;
+    let headers = Fields::from_list(&header_list)
+        .map_err(|e| McpError::internal(format!("Headers error: {e:?}")))?;
 
     // Build request body stream
     let body_vec = body_bytes.to_vec();
