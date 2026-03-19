@@ -18,4 +18,4 @@ test:
     {{act}} serve {{wasm}} --listen "{{addr}}" &
     trap "kill $!" EXIT
     npx wait-on {{baseurl}}/info
-    hurl --test --variable "baseurl={{baseurl}}" e2e/*.hurl
+    hurl --test --variable "baseurl={{baseurl}}" --variable "mcp_url=https://zip1.io/mcp" e2e/*.hurl
