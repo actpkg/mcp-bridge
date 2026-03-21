@@ -1,7 +1,5 @@
-use http::Uri;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use wasip3::http::types::{ErrorCode, Fields, Method, Request, RequestOptions, Response, Scheme};
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Config {
@@ -136,100 +134,37 @@ pub async fn initialize(config: &Config) -> Result<(), McpError> {
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
-/// Low-level HTTP POST using wasi:http.
+/// Low-level HTTP POST using wasi-fetch.
 async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpError> {
-    let uri: Uri = config
-        .url
-        .parse()
-        .map_err(|e| McpError::invalid_args(format!("Invalid URL: {e}")))?;
+    let mut builder = wasi_fetch::Client::new()
+        .post(&config.url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .body(body_bytes.to_vec())
+        .timeout(std::time::Duration::from_secs(30));
 
-    let scheme = match uri.scheme_str() {
-        Some("https") => Scheme::Https,
-        Some("http") => Scheme::Http,
-        Some(other) => {
-            return Err(McpError::invalid_args(format!(
-                "Unsupported scheme: {other}"
-            )));
-        }
-        None => return Err(McpError::invalid_args("Missing scheme in URL")),
-    };
-
-    // Build headers
-    let mut header_list: Vec<(String, Vec<u8>)> = vec![
-        ("content-type".to_string(), b"application/json".to_vec()),
-        ("accept".to_string(), b"application/json".to_vec()),
-    ];
     if let Some(ref token) = config.auth_token {
-        header_list.push((
-            "authorization".to_string(),
-            format!("Bearer {token}").into_bytes(),
-        ));
-    }
-    let headers = Fields::from_list(&header_list)
-        .map_err(|e| McpError::internal(format!("Headers error: {e:?}")))?;
-
-    // Build request body stream
-    let body_vec = body_bytes.to_vec();
-    let (mut body_writer, body_reader) = wasip3::wit_stream::new::<u8>();
-    wit_bindgen::spawn(async move {
-        body_writer.write_all(body_vec).await;
-    });
-
-    // Trailers (none)
-    let (_, trailers_reader) =
-        wasip3::wit_future::new::<Result<Option<Fields>, ErrorCode>>(|| Ok(None));
-
-    // Timeout: 30s connect and first-byte
-    let timeout_ns = 30_000 * 1_000_000u64; // 30s in nanoseconds
-    let opts = RequestOptions::new();
-    let _ = opts.set_connect_timeout(Some(timeout_ns));
-    let _ = opts.set_first_byte_timeout(Some(timeout_ns));
-
-    // Construct request
-    let (request, _) = Request::new(headers, Some(body_reader), trailers_reader, Some(opts));
-    let _ = request.set_method(&Method::Post);
-    let _ = request.set_scheme(Some(&scheme));
-
-    if let Some(authority) = uri.authority() {
-        let _ = request.set_authority(Some(authority.as_str()));
+        builder = builder.header("authorization", format!("Bearer {token}"));
     }
 
-    let _ = request.set_path_with_query(uri.path_and_query().map(|pq| pq.as_str()));
-
-    // Send request
-    let response = wasip3::http::client::send(request)
+    let response = builder
+        .send()
         .await
-        .map_err(|e| McpError::internal(format!("HTTP error: {e:?}")))?;
+        .map_err(|e| McpError::internal(format!("HTTP error: {e}")))?;
 
-    let status = response.get_status_code();
-
-    // Read response body
-    let (_, result_reader) = wasip3::wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
-    let (mut body_stream, _trailers) = Response::consume_body(response, result_reader);
-
-    let mut all_bytes = Vec::new();
-    let mut read_buf = Vec::with_capacity(16384);
-    loop {
-        let (result, chunk) = body_stream.read(read_buf).await;
-        match result {
-            wasip3::wit_bindgen::StreamResult::Complete(_) => {
-                all_bytes.extend_from_slice(&chunk);
-                if all_bytes.len() > MAX_RESPONSE_BYTES {
-                    return Err(McpError::internal("MCP response too large"));
-                }
-                read_buf = Vec::with_capacity(16384);
-            }
-            wasip3::wit_bindgen::StreamResult::Dropped
-            | wasip3::wit_bindgen::StreamResult::Cancelled => break,
-        }
-    }
+    let status = response.status().as_u16();
+    let body = response.into_body().bytes().await;
 
     if !(200..300).contains(&status) {
-        let detail = String::from_utf8_lossy(&all_bytes);
+        let detail = String::from_utf8_lossy(&body);
         return Err(McpError::internal(format!(
             "HTTP {status} from MCP server: {detail}"
         )));
     }
 
-    Ok(all_bytes)
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(McpError::internal("MCP response too large"));
+    }
+
+    Ok(body.to_vec())
 }
