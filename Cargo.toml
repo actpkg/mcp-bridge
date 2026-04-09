@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wit-bindgen = { version = "0.54", features = ["async-spawn"] }
+wit-bindgen = { version = "0.55", features = ["async-spawn"] }
 wasip3 = "0.4"
 wasi-fetch = "0.1"
 serde = { version = "1", features = ["derive"] }
