@@ -269,9 +269,10 @@ async fn read_sse_event(mut body: wasi_fetch::Body) -> Result<Vec<u8>, McpError>
             return Err(McpError::internal("MCP response too large"));
         }
         if let Ok(text) = std::str::from_utf8(&buf)
-            && let Some(data) = parse_sse_data(text) {
-                return Ok(data.into_bytes());
-            }
+            && let Some(data) = parse_sse_data(text)
+        {
+            return Ok(data.into_bytes());
+        }
     }
     Err(McpError::internal("SSE stream ended without a data event"))
 }
