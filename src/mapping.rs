@@ -70,8 +70,12 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
                 }));
             }
             ContentItem::Image(img) => {
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(&img.data)
+                    .unwrap_or_else(|_| img.data.clone());
                 events.push(StreamEvent::Content(ContentPart {
-                    data: img.data.clone(),
+                    data,
                     mime_type: Some(img.mime_type.clone()),
                     metadata: vec![],
                 }));

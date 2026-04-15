@@ -1,6 +1,9 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Deserialize, JsonSchema)]
 pub struct Config {
     /// MCP server URL (e.g. http://localhost:3000/mcp)
@@ -108,11 +111,11 @@ pub async fn mcp_request(
 /// Send initialize handshake to the MCP server.
 pub async fn initialize(config: &Config) -> Result<(), McpError> {
     let params = serde_json::json!({
-        "protocolVersion": "2025-11-25",
+        "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": {
             "name": "act-mcp-bridge",
-            "version": "0.1.0",
+            "version": CLIENT_VERSION,
         },
     });
 
@@ -134,12 +137,66 @@ pub async fn initialize(config: &Config) -> Result<(), McpError> {
 
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
-/// Low-level HTTP POST using wasi-fetch.
+/// Parse SSE events: find the first event with a non-empty `data:` field.
+///
+/// SSE streams may contain multiple events separated by blank lines.
+/// We look for the first one carrying actual JSON-RPC data.
+fn parse_sse_data(text: &str) -> Option<String> {
+    // Normalize \r\n to \n before splitting into event blocks
+    let normalized;
+    let text = if text.contains('\r') {
+        normalized = text.replace("\r\n", "\n");
+        normalized.as_str()
+    } else {
+        text
+    };
+    for event_block in text.split("\n\n") {
+        let mut data = String::new();
+        for line in event_block.lines() {
+            if let Some(value) = line.strip_prefix("data:") {
+                let value = value.trim_start();
+                if !value.is_empty() {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(value);
+                }
+            }
+        }
+        if !data.is_empty() {
+            return Some(data);
+        }
+    }
+    None
+}
+
+/// Read an SSE response chunk-by-chunk until the first complete event.
+///
+/// SSE connections use `keep-alive`, so we read incrementally and return
+/// as soon as we have a complete event (data followed by an empty line).
+async fn read_sse_event(mut body: wasi_fetch::Body) -> Result<Vec<u8>, McpError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = body.chunk().await {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_RESPONSE_BYTES {
+            return Err(McpError::internal("MCP response too large"));
+        }
+        // Try to find a complete SSE event with non-empty data
+        if let Ok(text) = std::str::from_utf8(&buf) {
+            if let Some(data) = parse_sse_data(text) {
+                return Ok(data.into_bytes());
+            }
+        }
+    }
+    Err(McpError::internal("SSE stream ended without a data event"))
+}
+
+/// Low-level HTTP POST using wasi-fetch (Streamable HTTP transport).
 async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpError> {
     let mut builder = wasi_fetch::Client::new()
         .post(&config.url)
         .header("content-type", "application/json")
-        .header("accept", "application/json")
+        .header("accept", "application/json, text/event-stream")
         .body(body_bytes.to_vec())
         .timeout(std::time::Duration::from_secs(30));
 
@@ -153,18 +210,28 @@ async fn http_post(config: &Config, body_bytes: &[u8]) -> Result<Vec<u8>, McpErr
         .map_err(|e| McpError::internal(format!("HTTP error: {e}")))?;
 
     let status = response.status().as_u16();
-    let body = response.into_body().bytes().await;
+    let is_sse = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/event-stream"));
 
-    if !(200..300).contains(&status) {
-        let detail = String::from_utf8_lossy(&body);
-        return Err(McpError::internal(format!(
-            "HTTP {status} from MCP server: {detail}"
-        )));
+    if is_sse {
+        if !(200..300).contains(&status) {
+            return Err(McpError::internal(format!("HTTP {status} from MCP server")));
+        }
+        read_sse_event(response.into_body()).await
+    } else {
+        let body = response.into_body().bytes().await;
+        if !(200..300).contains(&status) {
+            let detail = String::from_utf8_lossy(&body);
+            return Err(McpError::internal(format!(
+                "HTTP {status} from MCP server: {detail}"
+            )));
+        }
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(McpError::internal("MCP response too large"));
+        }
+        Ok(body.to_vec())
     }
-
-    if body.len() > MAX_RESPONSE_BYTES {
-        return Err(McpError::internal("MCP response too large"));
-    }
-
-    Ok(body.to_vec())
 }

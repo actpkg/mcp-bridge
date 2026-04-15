@@ -17,13 +17,20 @@ setup: init
 build:
     cargo build --release
 
+mcpport := `npx get-port-cli`
+mcpurl := "http://127.0.0.1:" + mcpport + "/mcp"
+
 test:
     #!/usr/bin/env bash
     set -euo pipefail
+    PIDS=()
+    trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
+    npx mcp-proxy --host 0.0.0.0 --port {{mcpport}} --stateless -- npx @trippnology/mcp-server-hello-world &
+    PIDS+=($!)
     {{act}} run {{wasm}} --http --listen "{{addr}}" &
-    trap "kill $!" EXIT
-    npx wait-on -t 180s {{baseurl}}/info
-    {{hurl}} --test --variable "baseurl={{baseurl}}" e2e/*.hurl
+    PIDS+=($!)
+    npx wait-on -t 180s "tcp:127.0.0.1:{{mcpport}}" {{baseurl}}/info
+    {{hurl}} --test --variable "baseurl={{baseurl}}" --variable "mcpurl={{mcpurl}}" e2e/*.hurl
 
 publish:
     #!/usr/bin/env bash
