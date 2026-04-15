@@ -1,4 +1,6 @@
-_commit: 7a5f5f5
+_commit: 3379f6d
 _src_path: https://github.com/actcore/act-component-template
-project_name: mcp-bridge
 description: Proxies a remote MCP server's tools as ACT tools
+needs_filesystem: false
+needs_http: true
+project_name: mcp-bridge
