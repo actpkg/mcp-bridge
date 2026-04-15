@@ -57,10 +57,6 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
         let config =
             mcp_client::parse_config_from_metadata(&metadata).map_err(|e| to_tool_error(&e))?;
 
-        mcp_client::initialize(&config)
-            .await
-            .map_err(|e| to_tool_error(&e))?;
-
         let result = mcp_client::mcp_request(&config, "tools/list", serde_json::json!({}))
             .await
             .map_err(|e| to_tool_error(&e))?;
@@ -100,8 +96,6 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
 
 async fn call_tool_inner(call: ToolCall) -> Result<Vec<StreamEvent>, mcp_client::McpError> {
     let config = mcp_client::parse_config_from_metadata(&call.metadata)?;
-
-    mcp_client::initialize(&config).await?;
 
     // Decode arguments from dCBOR to JSON
     let arguments: serde_json::Value = if call.arguments.is_empty() {
