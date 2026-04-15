@@ -630,7 +630,6 @@ version = "0.1.0"
 dependencies = [
  "act-types",
  "base64",
- "ciborium",
  "schemars 1.2.1",
  "serde",
  "serde_json",

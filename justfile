@@ -1,6 +1,7 @@
 wasm := "target/wasm32-wasip2/release/mcp_bridge.wasm"
 
 act := env("ACT", "npx @actcore/act")
+actbuild := env("ACT_BUILD", "npx @actcore/act-build")
 hurl := env("HURL", "npx @orangeopensource/hurl")
 oras := env("ORAS", "oras")
 registry := env("OCI_REGISTRY", "ghcr.io/actpkg")
@@ -16,6 +17,7 @@ setup: init
 
 build:
     cargo build --release
+    {{actbuild}} pack {{wasm}}
 
 mcpport := `npx get-port-cli`
 mcpurl := "http://127.0.0.1:" + mcpport + "/mcp"

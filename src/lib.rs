@@ -10,21 +10,6 @@ wit_bindgen::generate!({
 use act::core::types::*;
 use act_types::cbor;
 
-// WASM custom sections for component metadata.
-// SAFETY: link_section places data in named WASM custom sections; no executable code.
-#[unsafe(link_section = "act:component")]
-#[used]
-static _ACT_COMPONENT: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/act_component.cbor")).len()] =
-    *include_bytes!(concat!(env!("OUT_DIR"), "/act_component.cbor"));
-
-#[unsafe(link_section = "version")]
-#[used]
-static _VERSION: [u8; 5] = *b"0.1.0";
-
-#[unsafe(link_section = "description")]
-#[used]
-static _DESCRIPTION: [u8; 48] = *b"Proxies a remote MCP server's tools as ACT tools";
-
 struct McpBridge;
 
 export!(McpBridge);
