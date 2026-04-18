@@ -14,15 +14,6 @@ struct McpBridge;
 
 export!(McpBridge);
 
-/// Helper: create a response stream from events.
-fn respond(events: Vec<StreamEvent>) -> wit_bindgen::rt::async_support::StreamReader<StreamEvent> {
-    let (mut writer, reader) = wit_stream::new::<StreamEvent>();
-    wit_bindgen::spawn(async move {
-        writer.write_all(events).await;
-    });
-    reader
-}
-
 /// Helper: create a ToolError from McpError.
 fn to_tool_error(e: &mcp_client::McpError) -> ToolError {
     ToolError {
@@ -67,19 +58,16 @@ impl exports::act::core::tool_provider::Guest for McpBridge {
         })
     }
 
-    async fn call_tool(
-        call: ToolCall,
-    ) -> wit_bindgen::rt::async_support::StreamReader<StreamEvent> {
+    async fn call_tool(call: ToolCall) -> ToolResult {
         let events = match call_tool_inner(call).await {
             Ok(events) => events,
-            Err(e) => vec![StreamEvent::Error(to_tool_error(&e))],
+            Err(e) => vec![ToolEvent::Error(to_tool_error(&e))],
         };
-
-        respond(events)
+        ToolResult::Immediate(events)
     }
 }
 
-async fn call_tool_inner(call: ToolCall) -> Result<Vec<StreamEvent>, mcp_client::McpError> {
+async fn call_tool_inner(call: ToolCall) -> Result<Vec<ToolEvent>, mcp_client::McpError> {
     let config = mcp_client::parse_config_from_metadata(&call.metadata)?;
 
     // Decode arguments from dCBOR to JSON

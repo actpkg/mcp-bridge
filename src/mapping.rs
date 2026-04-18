@@ -1,8 +1,6 @@
 // MCP <-> ACT type conversion utilities.
 
-use crate::act::core::types::{
-    ContentPart, LocalizedString, StreamEvent, ToolDefinition, ToolError,
-};
+use crate::act::core::types::{ContentPart, LocalizedString, ToolDefinition, ToolError, ToolEvent};
 use act_types::cbor::to_cbor;
 use act_types::constants::{
     ERR_INTERNAL, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, MIME_TEXT,
@@ -39,8 +37,8 @@ pub fn mcp_tool_to_act(tool: &act_types::mcp::ToolDefinition) -> ToolDefinition 
     }
 }
 
-/// Convert an MCP `tools/call` result to a list of ACT `StreamEvent`s.
-pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
+/// Convert an MCP `tools/call` result to a list of ACT `ToolEvent`s.
+pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<ToolEvent> {
     if result.is_error == Some(true) {
         let message = result
             .content
@@ -51,7 +49,7 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        return vec![StreamEvent::Error(ToolError {
+        return vec![ToolEvent::Error(ToolError {
             kind: ERR_INTERNAL.to_string(),
             message: LocalizedString::Plain(message),
             metadata: vec![],
@@ -63,7 +61,7 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
     for item in &result.content {
         match item {
             ContentItem::Text(t) => {
-                events.push(StreamEvent::Content(ContentPart {
+                events.push(ToolEvent::Content(ContentPart {
                     data: t.text.as_bytes().to_vec(),
                     mime_type: Some(MIME_TEXT.to_string()),
                     metadata: vec![],
@@ -74,7 +72,7 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
                 let data = base64::engine::general_purpose::STANDARD
                     .decode(&img.data)
                     .unwrap_or_else(|_| img.data.clone());
-                events.push(StreamEvent::Content(ContentPart {
+                events.push(ToolEvent::Content(ContentPart {
                     data,
                     mime_type: Some(img.mime_type.clone()),
                     metadata: vec![],
@@ -87,7 +85,7 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
                         .mime_type
                         .clone()
                         .unwrap_or_else(|| MIME_TEXT.to_string());
-                    events.push(StreamEvent::Content(ContentPart {
+                    events.push(ToolEvent::Content(ContentPart {
                         data: text.as_bytes().to_vec(),
                         mime_type: Some(mime_type),
                         metadata: vec![],
@@ -97,7 +95,7 @@ pub fn mcp_result_to_events(result: &CallToolResult) -> Vec<StreamEvent> {
                         .mime_type
                         .clone()
                         .unwrap_or_else(|| "application/octet-stream".to_string());
-                    events.push(StreamEvent::Content(ContentPart {
+                    events.push(ToolEvent::Content(ContentPart {
                         data: blob.clone(),
                         mime_type: Some(mime_type),
                         metadata: vec![],
@@ -182,7 +180,7 @@ mod tests {
         let events = mcp_result_to_events(&result);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Content(cp) => {
+            ToolEvent::Content(cp) => {
                 assert_eq!(cp.data, b"Hello, world!");
                 assert_eq!(cp.mime_type.as_deref(), Some("text/plain"));
             }
@@ -201,7 +199,7 @@ mod tests {
         let events = mcp_result_to_events(&result);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Error(e) => {
+            ToolEvent::Error(e) => {
                 assert_eq!(e.kind, ERR_INTERNAL);
                 assert!(
                     matches!(&e.message, LocalizedString::Plain(s) if s == "Something went wrong")
@@ -223,7 +221,7 @@ mod tests {
         let events = mcp_result_to_events(&result);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Content(cp) => {
+            ToolEvent::Content(cp) => {
                 assert_eq!(cp.data, b"\x89PNG");
                 assert_eq!(cp.mime_type.as_deref(), Some("image/png"));
             }
@@ -247,7 +245,7 @@ mod tests {
         let events = mcp_result_to_events(&result);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Content(cp) => {
+            ToolEvent::Content(cp) => {
                 assert_eq!(cp.data, b"file contents");
                 assert_eq!(cp.mime_type.as_deref(), Some("text/plain"));
             }
@@ -271,7 +269,7 @@ mod tests {
         let events = mcp_result_to_events(&result);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Content(cp) => {
+            ToolEvent::Content(cp) => {
                 assert_eq!(cp.data, b"\x00\x01\x02");
             }
             _ => panic!("expected content event"),
