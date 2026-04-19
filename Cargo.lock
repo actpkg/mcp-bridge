@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "mcp-bridge"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "act-types",
  "base64",
