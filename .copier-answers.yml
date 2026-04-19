@@ -1,5 +1,5 @@
 _commit: 3379f6d
-_src_path: https://github.com/actcore/act-component-template
+_src_path: https://github.com/actcore/act-template-rust
 description: Proxies a remote MCP server's tools as ACT tools
 needs_filesystem: false
 needs_http: true
