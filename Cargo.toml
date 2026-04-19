@@ -1,7 +1,7 @@
 [package]
 name = "mcp-bridge"
 description = "Proxies a remote MCP server's tools as ACT tools"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [package.metadata.act-component.std.capabilities."wasi:http"]
