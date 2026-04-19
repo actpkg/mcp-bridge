@@ -5,6 +5,10 @@ version = "0.1.3"
 edition = "2024"
 
 [package.metadata.act.std.capabilities."wasi:http"]
+description = "Proxies a remote MCP server; forwards JSON-RPC tool calls over HTTP."
+
+[[package.metadata.act.std.capabilities."wasi:http".allow]]
+host = "*"
 
 [dependencies]
 wit-bindgen = { version = "0.57", features = ["async-spawn"] }
