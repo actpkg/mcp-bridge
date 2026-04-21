@@ -29,7 +29,7 @@ test:
     trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
     npx mcp-proxy --host 0.0.0.0 --port {{mcpport}} --stateless -- npx @trippnology/mcp-server-hello-world &
     PIDS+=($!)
-    {{act}} run {{wasm}} --http --listen "{{addr}}" &
+    {{act}} run {{wasm}} --http --listen "{{addr}}" --http-policy open &
     PIDS+=($!)
     npx wait-on -t 180s "tcp:127.0.0.1:{{mcpport}}" {{baseurl}}/info
     {{hurl}} --test --variable "baseurl={{baseurl}}" --variable "mcpurl={{mcpurl}}" e2e/*.hurl
