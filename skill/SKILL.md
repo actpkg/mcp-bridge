@@ -7,71 +7,79 @@ metadata:
 
 # MCP Bridge Component
 
-Connect to a remote MCP server (Streamable HTTP transport) and expose all its tools as native ACT tools. The bridge handles protocol negotiation, type mapping, and error translation automatically.
+Connect to a remote MCP server (Streamable HTTP transport) and expose
+all its tools as native ACT tools. The bridge owns the MCP `initialize`
+handshake and the `Mcp-Session-Id` header lifecycle so callers don't
+have to.
 
-## Configuration
+## How sessions work here
 
-Requires metadata on every request:
+This component requires a session. Open one against the upstream MCP
+server you want to proxy, then thread the returned id into every tool
+call as `std:session-id` metadata.
 
-| Key | Type | Required | Description |
-|-----|------|----------|-------------|
+Open-session args:
+
+| field | type | required | description |
+| --- | --- | --- | --- |
 | `url` | string | yes | MCP server endpoint (e.g. `http://localhost:3000/mcp`) |
-| `auth_token` | string | no | Bearer token for authentication |
+| `auth_token` | string | no | Bearer token for upstream authentication |
 
-The bridge performs MCP `initialize` + `notifications/initialized` handshake on each `list-tools` and `call-tool` invocation.
+`open-session` runs the MCP `initialize` + `notifications/initialized`
+handshake against the upstream and stashes the resulting
+`Mcp-Session-Id` (if the server issues one). `close-session` sends
+a best-effort `DELETE` to release the upstream session.
 
-## How It Works
+Without `std:session-id`, `list-tools` returns an empty list and
+`call-tool` errors with `std:invalid-args`. Calls referencing a
+closed session-id return `std:session-not-found` (HTTP 404).
 
-1. **`list-tools`** — sends `tools/list` to the MCP server, maps each MCP tool definition to an ACT `ToolDefinition` (input schema, annotations)
-2. **`call-tool`** — decodes dCBOR arguments to JSON, sends `tools/call`, maps the MCP response back to ACT `StreamEvent`s
-
-### MCP Annotation Mapping
+## MCP annotation mapping
 
 MCP tool annotations are preserved as ACT metadata:
 
-| MCP Annotation | ACT Metadata Key |
-|----------------|-------------------|
+| MCP annotation | ACT metadata key |
+| --- | --- |
 | `readOnlyHint: true` | `std:read-only` |
 | `idempotentHint: true` | `std:idempotent` |
 | `destructiveHint: true` | `std:destructive` |
 
-### Content Type Mapping
+## Content type mapping
 
-| MCP Content Type | ACT Content |
-|------------------|-------------|
-| `TextContent` | `text/plain` data |
-| `ImageContent` | Binary data with original MIME type |
-| `ResourceContent` (text) | Text data with resource MIME type |
-| `ResourceContent` (blob) | Binary data with resource MIME type |
+| MCP content type | ACT content |
+| --- | --- |
+| `TextContent` | `text/plain` |
+| `ImageContent` | binary data with original MIME |
+| `ResourceContent` (text) | text data with resource MIME |
+| `ResourceContent` (blob) | binary data with resource MIME |
 
-### Error Mapping
+## Error mapping
 
-MCP `isError: true` results are translated to ACT `StreamEvent::Error`. JSON-RPC error codes map to ACT error kinds:
+MCP `isError: true` results become `tool-event::error`. JSON-RPC codes:
 
-| JSON-RPC Code | ACT Error Kind |
-|---------------|----------------|
+| JSON-RPC code | ACT error kind |
+| --- | --- |
 | `-32601` (method not found) | `std:not-found` |
-| `-32602` (invalid params) | `std:invalid-args` |
+| `-32600` / `-32602` | `std:invalid-args` |
 | other | `std:internal` |
 
-## Examples
+## Example
 
-**List tools from a local MCP server:**
-```
-# metadata: url = "http://localhost:3000/mcp"
-list-tools → [tool definitions from remote server]
-```
+```text
+open_session({"url": "https://mcp.example.com/mcp", "auth_token": "sk-..."})
+→ {"id": "mcp_0", "metadata": {}}
 
-**Call a proxied tool with authentication:**
-```
-# metadata: url = "https://mcp.example.com/mcp", auth_token = "sk-..."
-call-tool(name: "search", arguments: {"query": "hello"})
-→ streamed results from remote MCP server
+list_tools(_meta = {std:session-id: "mcp_0"})
+→ [echo, search, ...]
+
+call_tool("echo", {"message": "hi"}, _meta = {std:session-id: "mcp_0"})
+→ "hi"
+
+close_session("mcp_0")
 ```
 
 ## Limitations
 
-- Streamable HTTP transport only (no stdio, no legacy SSE)
-- Stateless — initializes a new MCP session per request (no session reuse)
-- Response size capped at 10 MB
-- 30-second HTTP timeout per request
+- Streamable HTTP transport only (no stdio, no legacy SSE).
+- Response size capped at 10 MB.
+- 30-second HTTP timeout per request.

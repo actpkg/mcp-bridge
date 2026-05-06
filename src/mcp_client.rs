@@ -1,16 +1,17 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::cell::RefCell;
-use std::collections::HashMap;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Deserialize, JsonSchema)]
+/// Per-session config: where to talk to the upstream MCP server.
+/// Populated from `open-session.args`.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "schemars", title = "mcp-bridge open-session args")]
 pub struct Config {
     /// MCP server URL (e.g. http://localhost:3000/mcp)
     pub url: String,
-    /// Optional Bearer token for authentication
+    /// Optional Bearer token for authentication.
     pub auth_token: Option<String>,
 }
 
@@ -49,63 +50,11 @@ impl std::fmt::Display for McpError {
     }
 }
 
-// ── Session cache ───────────────────────────────────────────────────────────
+// ── Per-session MCP state ──────────────────────────────────────────────────
 
-thread_local! {
-    /// Maps session key → Mcp-Session-Id. WASM is single-threaded, RefCell is safe.
-    static SESSIONS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
-}
-
-fn session_key(config: &Config) -> String {
-    match &config.auth_token {
-        Some(token) => format!("{}\0{token}", config.url),
-        None => config.url.clone(),
-    }
-}
-
-fn get_session(config: &Config) -> Option<String> {
-    SESSIONS.with(|s| s.borrow().get(&session_key(config)).cloned())
-}
-
-fn set_session(config: &Config, session_id: String) {
-    SESSIONS.with(|s| {
-        s.borrow_mut().insert(session_key(config), session_id);
-    });
-}
-
-fn clear_session(config: &Config) {
-    SESSIONS.with(|s| {
-        s.borrow_mut().remove(&session_key(config));
-    });
-}
-
-// ── Config from metadata ────────────────────────────────────────────────────
-
-/// Extract Config from metadata key-value pairs.
-/// Each value is CBOR-encoded.
-pub fn parse_config_from_metadata(metadata: &[(String, Vec<u8>)]) -> Result<Config, McpError> {
-    let url = metadata
-        .iter()
-        .find(|(k, _)| k == "url")
-        .map(|(_, v)| act_types::cbor::from_cbor::<String>(v))
-        .transpose()
-        .map_err(|e| McpError::invalid_args(format!("Invalid url in metadata: {e}")))?
-        .ok_or_else(|| McpError::invalid_args("Missing 'url' in metadata"))?;
-
-    let auth_token = metadata
-        .iter()
-        .find(|(k, _)| k == "auth_token")
-        .map(|(_, v)| act_types::cbor::from_cbor::<String>(v))
-        .transpose()
-        .map_err(|e| McpError::invalid_args(format!("Invalid auth_token in metadata: {e}")))?;
-
-    Ok(Config { url, auth_token })
-}
-
-// ── MCP protocol ────────────────────────────────────────────────────────────
-
-/// Send initialize handshake and cache the session ID if returned.
-async fn do_initialize(config: &Config) -> Result<(), McpError> {
+/// Run the MCP `initialize` handshake. Returns the upstream Mcp-Session-Id
+/// header value if the server issued one.
+pub async fn initialize(config: &Config) -> Result<Option<String>, McpError> {
     let params = serde_json::json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {},
@@ -125,12 +74,6 @@ async fn do_initialize(config: &Config) -> Result<(), McpError> {
 
     let resp = http_post(config, &body_bytes, None).await?;
 
-    // Cache session ID if the server returned one
-    if let Some(sid) = resp.session_id {
-        set_session(config, sid);
-    }
-
-    // Parse result to validate the response
     let response: serde_json::Value = serde_json::from_slice(&resp.body)
         .map_err(|e| McpError::internal(format!("Invalid JSON in initialize response: {e}")))?;
     if let Some(error) = response.get("error") {
@@ -141,37 +84,28 @@ async fn do_initialize(config: &Config) -> Result<(), McpError> {
         return Err(McpError::internal(msg));
     }
 
-    // Send initialized notification (fire-and-forget)
+    // Send the initialized notification (fire-and-forget).
     let notification = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized",
     });
     let notification_bytes = serde_json::to_vec(&notification)
         .map_err(|e| McpError::internal(format!("JSON serialize error: {e}")))?;
-    let _ = http_post(config, &notification_bytes, get_session(config)).await;
+    let _ = http_post(config, &notification_bytes, resp.session_id.as_deref()).await;
 
-    Ok(())
+    Ok(resp.session_id)
 }
 
-/// Ensure we have an active session, initializing if needed.
-async fn ensure_initialized(config: &Config) -> Result<(), McpError> {
-    if get_session(config).is_some() {
-        return Ok(());
-    }
-    do_initialize(config).await
-}
-
-/// Send a JSON-RPC 2.0 request to the MCP server and return the result.
-///
-/// Handles session lifecycle: initializes on first call, includes session ID,
-/// and re-initializes on 404 (expired session).
+/// Send a JSON-RPC 2.0 request to the MCP server using the provided
+/// session-id (already validated by the bridge — see open_session). On
+/// HTTP 404 the upstream session expired; the caller is responsible for
+/// recovery (reopening or returning std:session-not-found).
 pub async fn mcp_request(
     config: &Config,
+    upstream_session_id: Option<&str>,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, McpError> {
-    ensure_initialized(config).await?;
-
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -181,23 +115,7 @@ pub async fn mcp_request(
     let body_bytes = serde_json::to_vec(&body)
         .map_err(|e| McpError::internal(format!("JSON serialize error: {e}")))?;
 
-    let resp = http_post(config, &body_bytes, get_session(config)).await;
-
-    // Handle 404 — session expired, re-initialize and retry once
-    let resp = match resp {
-        Err(ref e) if e.message.contains("HTTP 404") => {
-            clear_session(config);
-            do_initialize(config).await?;
-            http_post(config, &body_bytes, get_session(config)).await?
-        }
-        other => other?,
-    };
-
-    // Update session ID if server sent a new one
-    if let Some(sid) = resp.session_id {
-        set_session(config, sid);
-    }
-
+    let resp = http_post(config, &body_bytes, upstream_session_id).await?;
     let response: serde_json::Value = serde_json::from_slice(&resp.body)
         .map_err(|e| McpError::internal(format!("Invalid JSON response: {e}")))?;
 
@@ -219,6 +137,21 @@ pub async fn mcp_request(
         .get("result")
         .cloned()
         .ok_or_else(|| McpError::internal("JSON-RPC response missing 'result' field"))
+}
+
+/// Best-effort upstream session close (DELETE /mcp with the session
+/// header). Cleanup errors are swallowed by design — close-session is
+/// advisory in WIT.
+pub async fn close_upstream(config: &Config, upstream_session_id: &str) {
+    let mut builder = wasi_fetch::Client::new()
+        .delete(&config.url)
+        .header("accept", "application/json")
+        .header(SESSION_HEADER, upstream_session_id)
+        .timeout(std::time::Duration::from_secs(5));
+    if let Some(ref token) = config.auth_token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let _ = builder.send().await;
 }
 
 // ── HTTP transport ──────────────────────────────────────────────────────────
@@ -281,7 +214,7 @@ async fn read_sse_event(mut body: wasi_fetch::Body) -> Result<Vec<u8>, McpError>
 async fn http_post(
     config: &Config,
     body_bytes: &[u8],
-    session_id: Option<String>,
+    session_id: Option<&str>,
 ) -> Result<HttpResponse, McpError> {
     let mut builder = wasi_fetch::Client::new()
         .post(&config.url)
@@ -293,8 +226,8 @@ async fn http_post(
     if let Some(ref token) = config.auth_token {
         builder = builder.header("authorization", format!("Bearer {token}"));
     }
-    if let Some(ref sid) = session_id {
-        builder = builder.header(SESSION_HEADER, sid.as_str());
+    if let Some(sid) = session_id {
+        builder = builder.header(SESSION_HEADER, sid);
     }
 
     let response = builder

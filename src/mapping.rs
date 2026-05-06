@@ -1,6 +1,8 @@
 // MCP <-> ACT type conversion utilities.
 
-use crate::act::core::types::{ContentPart, LocalizedString, ToolDefinition, ToolError, ToolEvent};
+use crate::exports::act::tools::tool_provider::{
+    ContentPart, Error as ToolError, LocalizedString, ToolDefinition, ToolEvent,
+};
 use act_types::cbor::to_cbor;
 use act_types::constants::{
     ERR_INTERNAL, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, MIME_TEXT,
