@@ -1,5 +1,7 @@
 [std]
-
-
+name = "mcp-bridge"
 
 [std.capabilities."wasi:http"]
+
+[[std.capabilities."wasi:http".allow]]
+host = "*"
