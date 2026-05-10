@@ -79,11 +79,11 @@ jobs:
         with:
           name: component.wasm
           path: target/wasm32-wasip2/release/
-      - uses: oras-project/setup-oras@v2
       - uses: taiki-e/install-action@just
-      - run: echo ${{ secrets.GITHUB_TOKEN }} | oras login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Publish
         id: publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: just publish
       - name: Attest
         if: steps.publish.outputs.digest != ''
