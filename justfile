@@ -41,11 +41,11 @@ publish:
     VERSION=$(echo "$INFO" | jq -r .version)
     SOURCE=$(git remote get-url origin 2>/dev/null | sed 's/\.git$//' | sed 's|git@github.com:|https://github.com/|' || echo "")
     OUTPUT=$({{actbuild}} push {{wasm}} "{{registry}}/$NAME:$VERSION" \
-      --skip-if-identical \
+      --skip-if-exists \
       --also-tag latest \
-      --source "$SOURCE" 2>&1)
+      --source "$SOURCE" 2>&1) || { echo "$OUTPUT" >&2; exit 1; }
     echo "$OUTPUT"
-    DIGEST=$(echo "$OUTPUT" | grep "^Digest:" | awk '{print $2}')
+    DIGEST=$(echo "$OUTPUT" | grep "^Digest:" | awk '{print $2}' || true)
     if [ -n "${GITHUB_OUTPUT:-}" ]; then
       echo "image={{registry}}/$NAME" >> "$GITHUB_OUTPUT"
       echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
