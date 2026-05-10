@@ -300,7 +300,7 @@ impl session_exports::Guest for McpBridge {
         if let Some((config, sid)) = upstream {
             // Fire-and-forget: tell the upstream we're done. close-session
             // is sync per WIT, so we kick this off via wit_bindgen::spawn.
-            wit_bindgen::spawn(async move {
+            wit_bindgen::spawn_local(async move {
                 mcp_client::close_upstream(&config, &sid).await;
             });
         }
