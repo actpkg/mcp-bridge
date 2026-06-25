@@ -22,6 +22,11 @@ use std::collections::HashMap;
 
 use exports::act::sessions::session_provider as session_exports;
 use exports::act::tools::tool_provider as tool_exports;
+// In act:tools@0.2.0 the data model moved to a function-free `types`
+// interface; `localized-string` lives in act:core. The `tool-provider`
+// export module no longer re-exports these, so reference them directly.
+use act::core::types::LocalizedString;
+use act::tools::types::ToolDefinition;
 use mcp_client::{Config, McpError};
 
 // ── Per-session state ──────────────────────────────────────────────────────
@@ -74,7 +79,7 @@ fn extract_session_id(metadata: &[(String, Vec<u8>)]) -> Option<String> {
 fn invalid_args(msg: impl Into<String>) -> tool_exports::Error {
     tool_exports::Error {
         kind: act_types::constants::ERR_INVALID_ARGS.to_string(),
-        message: tool_exports::LocalizedString::Plain(msg.into()),
+        message: LocalizedString::Plain(msg.into()),
         metadata: vec![],
     }
 }
@@ -82,7 +87,7 @@ fn invalid_args(msg: impl Into<String>) -> tool_exports::Error {
 fn session_not_found(session_id: &str) -> tool_exports::Error {
     tool_exports::Error {
         kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
-        message: tool_exports::LocalizedString::Plain(format!("Unknown session-id: {session_id}")),
+        message: LocalizedString::Plain(format!("Unknown session-id: {session_id}")),
         metadata: vec![],
     }
 }
@@ -90,7 +95,7 @@ fn session_not_found(session_id: &str) -> tool_exports::Error {
 fn mcp_to_wit_error(e: &McpError) -> tool_exports::Error {
     tool_exports::Error {
         kind: e.kind.clone(),
-        message: tool_exports::LocalizedString::Plain(e.message.clone()),
+        message: LocalizedString::Plain(e.message.clone()),
         metadata: vec![],
     }
 }
@@ -138,7 +143,7 @@ impl tool_exports::Guest for McpBridge {
                 )))
             })?;
 
-        let tools: Vec<tool_exports::ToolDefinition> = list_result
+        let tools: Vec<ToolDefinition> = list_result
             .tools
             .iter()
             .map(mapping::mcp_tool_to_act)
@@ -234,9 +239,7 @@ impl session_exports::Guest for McpBridge {
         let schema = schemars::schema_for!(Config);
         serde_json::to_string(&schema).map_err(|e| session_exports::Error {
             kind: act_types::constants::ERR_INTERNAL.to_string(),
-            message: tool_exports::LocalizedString::Plain(format!(
-                "Schema serialization failed: {e}"
-            )),
+            message: LocalizedString::Plain(format!("Schema serialization failed: {e}")),
             metadata: vec![],
         })
     }
@@ -255,9 +258,7 @@ impl session_exports::Guest for McpBridge {
             serde_json::from_value(serde_json::Value::Object(json_map)).map_err(|e| {
                 session_exports::Error {
                     kind: act_types::constants::ERR_INVALID_ARGS.to_string(),
-                    message: tool_exports::LocalizedString::Plain(format!(
-                        "Invalid open-session args: {e}"
-                    )),
+                    message: LocalizedString::Plain(format!("Invalid open-session args: {e}")),
                     metadata: vec![],
                 }
             })?;
@@ -270,7 +271,7 @@ impl session_exports::Guest for McpBridge {
                 .await
                 .map_err(|e| session_exports::Error {
                     kind: e.kind.clone(),
-                    message: tool_exports::LocalizedString::Plain(e.message.clone()),
+                    message: LocalizedString::Plain(e.message.clone()),
                     metadata: vec![],
                 })?;
 

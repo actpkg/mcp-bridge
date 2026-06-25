@@ -1,8 +1,11 @@
 // MCP <-> ACT type conversion utilities.
 
-use crate::exports::act::tools::tool_provider::{
-    ContentPart, Error as ToolError, LocalizedString, ToolDefinition, ToolEvent,
-};
+// act:tools@0.2.0 moved the data model to the function-free `types`
+// interface; `error`/`tool-event` are still re-exported via `tool-provider`,
+// and `localized-string` lives in act:core.
+use crate::act::core::types::LocalizedString;
+use crate::act::tools::types::{ContentPart, ToolDefinition};
+use crate::exports::act::tools::tool_provider::{Error as ToolError, ToolEvent};
 use act_types::cbor::to_cbor;
 use act_types::constants::{
     ERR_INTERNAL, META_DESTRUCTIVE, META_IDEMPOTENT, META_READ_ONLY, MIME_TEXT,
