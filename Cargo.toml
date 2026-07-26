@@ -13,6 +13,7 @@ schemars = "1"
 act-types = "0.12"
 ciborium = "0.2"
 base64 = "0.22"
+rmcp = { version = "=3.0.0-beta.2", default-features = false }
 
 [profile.release]
 lto = "fat"

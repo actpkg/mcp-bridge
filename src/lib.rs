@@ -1,10 +1,16 @@
 //! mcp-bridge — proxy a remote MCP server's tools as local ACT tools.
 //!
-//! Each `open-session` does an MCP `initialize` handshake against the
-//! upstream and stashes the resulting `Mcp-Session-Id` (if any) for the
-//! lifetime of the bridge-issued session-id. Subsequent capability
-//! calls reference the bridge id via `std:session-id`; the bridge maps
-//! it back to the upstream session header (NAT-style — ACT-SESSIONS §3.2).
+//! Each `open-session` negotiates a protocol dialect with the upstream
+//! (see `mcp_client::negotiate`) and holds the result for the lifetime of
+//! the bridge-issued session-id. Subsequent capability calls reference the
+//! bridge id via `std:session-id`.
+//!
+//! Against a **legacy** (`2025-11-25`) server the bridge runs the
+//! `initialize` handshake and NATs its own session-id onto the upstream
+//! `Mcp-Session-Id` header (ACT-SESSIONS §3.2). Against a **modern**
+//! (`2026-07-28`) server there is no upstream session to NAT — SEP-2575
+//! removed protocol-level sessions — so the ACT session carries only the
+//! per-client config (url, auth token) that ACT-AUTH puts in session args.
 
 #![allow(clippy::all)]
 
@@ -27,15 +33,15 @@ use exports::act::tools::tool_provider as tool_exports;
 // export module no longer re-exports these, so reference them directly.
 use act::core::types::LocalizedString;
 use act::tools::types::ToolDefinition;
-use mcp_client::{Config, McpError};
+use mcp_client::{Config, Dialect, McpError};
 
 // ── Per-session state ──────────────────────────────────────────────────────
 
 struct UpstreamSession {
     config: Config,
-    /// Mcp-Session-Id from the upstream initialize handshake. None when
-    /// the server doesn't issue session ids (stateless MCP servers).
-    upstream_session_id: Option<String>,
+    /// Wire dialect negotiated with this upstream, plus whatever per-dialect
+    /// state it implies (the legacy `Mcp-Session-Id`, if the server issued one).
+    dialect: Dialect,
 }
 
 thread_local! {
@@ -52,11 +58,11 @@ fn alloc_session_id() -> String {
 }
 
 /// Snapshot the per-session pieces needed to dispatch a request.
-fn snapshot_session(session_id: &str) -> Option<(Config, Option<String>)> {
+fn snapshot_session(session_id: &str) -> Option<(Config, Dialect)> {
     SESSIONS.with(|s| {
         s.borrow()
             .get(session_id)
-            .map(|u| (u.config.clone(), u.upstream_session_id.clone()))
+            .map(|u| (u.config.clone(), u.dialect.clone()))
     })
 }
 
@@ -122,21 +128,17 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let (config, mcp_sid) = match snapshot_session(&session_id) {
+        let (config, dialect) = match snapshot_session(&session_id) {
             Some(s) => s,
             None => return Err(session_not_found(&session_id)),
         };
 
-        let result = mcp_client::mcp_request(
-            &config,
-            mcp_sid.as_deref(),
-            "tools/list",
-            serde_json::json!({}),
-        )
-        .await
-        .map_err(|e| mcp_to_wit_error(&e))?;
+        let result =
+            mcp_client::mcp_request(&config, &dialect, "tools/list", serde_json::json!({}))
+                .await
+                .map_err(|e| mcp_to_wit_error(&e))?;
 
-        let list_result: act_types::mcp::ListToolsResult =
+        let list_result: rmcp::model::ListToolsResult =
             serde_json::from_value(result).map_err(|e| {
                 mcp_to_wit_error(&McpError::internal(format!(
                     "Failed to parse tools/list response: {e}"
@@ -169,7 +171,7 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let (config, mcp_sid) = match snapshot_session(&session_id) {
+        let (config, dialect) = match snapshot_session(&session_id) {
             Some(s) => s,
             None => {
                 return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
@@ -194,14 +196,17 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let params = act_types::mcp::CallToolParams {
-            name,
-            arguments: Some(args_json),
-        };
+        // `arguments` is sent even when empty: servers that declare a required
+        // object schema reject a call that omits the field entirely.
+        let params =
+            rmcp::model::CallToolRequestParams::new(name).with_arguments(match args_json {
+                serde_json::Value::Object(map) => map,
+                _ => serde_json::Map::new(),
+            });
 
         let result = match mcp_client::mcp_request(
             &config,
-            mcp_sid.as_deref(),
+            &dialect,
             "tools/call",
             serde_json::to_value(&params).unwrap_or_default(),
         )
@@ -215,7 +220,19 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let call_result: act_types::mcp::CallToolResult = match serde_json::from_value(result) {
+        // SEP-2322 (MRTR) and SEP-2663 (Tasks) let `tools/call` answer with
+        // something other than a finished result. Neither shape deserializes
+        // into `CallToolResult`, so discriminate on `resultType` first and
+        // fail loudly — a bare parse error here would read as a broken server.
+        if let Some(result_type) = result.get("resultType").and_then(|v| v.as_str())
+            && let Some(message) = unsupported_result_type(result_type)
+        {
+            return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
+                mcp_to_wit_error(&McpError::internal(message)),
+            )]);
+        }
+
+        let call_result: rmcp::model::CallToolResult = match serde_json::from_value(result) {
             Ok(r) => r,
             Err(e) => {
                 return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
@@ -227,6 +244,34 @@ impl tool_exports::Guest for McpBridge {
         };
 
         tool_exports::ToolResult::Immediate(mapping::mcp_result_to_events(&call_result))
+    }
+}
+
+/// Explain a `tools/call` result shape the bridge cannot forward, or `None`
+/// when the shape is an ordinary completed result.
+///
+/// TODO(act-mrtr): a Multi Round-Trip Request (SEP-2322) asks the *client* to
+/// fulfil sampling / elicitation / roots requests and retry the call with
+/// `inputResponses` + the echoed `requestState`. ACT has no mid-call
+/// "input required" channel for a component to hand that back to its caller,
+/// so wiring it up needs a spec decision first (an ACT-SESSIONS or
+/// ACT-SPEC-level interaction event). Until then the call fails explicitly
+/// rather than silently returning an empty result.
+fn unsupported_result_type(result_type: &str) -> Option<String> {
+    match result_type {
+        "input_required" => Some(
+            "Upstream MCP server returned an MRTR input-required result (SEP-2322). \
+             The bridge cannot fulfil server-initiated sampling/elicitation/roots \
+             requests: ACT has no mid-call input channel yet, so this tool cannot \
+             be called through mcp-bridge."
+                .to_string(),
+        ),
+        "task" => Some(
+            "Upstream MCP server materialized a task for this call (SEP-2663). \
+             The bridge does not poll tasks/get, so the result cannot be retrieved."
+                .to_string(),
+        ),
+        _ => None,
     }
 }
 
@@ -263,27 +308,21 @@ impl session_exports::Guest for McpBridge {
                 }
             })?;
 
-        // Run the upstream initialize handshake — failure surfaces as a
-        // proper session-open error so the agent sees auth / connect
-        // problems before issuing a session-id (per ACT-SESSIONS §2.2).
-        let upstream_session_id =
-            mcp_client::initialize(&config)
-                .await
-                .map_err(|e| session_exports::Error {
-                    kind: e.kind.clone(),
-                    message: LocalizedString::Plain(e.message.clone()),
-                    metadata: vec![],
-                })?;
+        // Negotiate the dialect up front — failure surfaces as a proper
+        // session-open error so the agent sees auth / connect / protocol
+        // problems before a session-id is issued (per ACT-SESSIONS §2.2).
+        let dialect = mcp_client::negotiate(&config)
+            .await
+            .map_err(|e| session_exports::Error {
+                kind: e.kind.clone(),
+                message: LocalizedString::Plain(e.message.clone()),
+                metadata: vec![],
+            })?;
 
         let id = alloc_session_id();
         SESSIONS.with(|s| {
-            s.borrow_mut().insert(
-                id.clone(),
-                UpstreamSession {
-                    config,
-                    upstream_session_id,
-                },
-            );
+            s.borrow_mut()
+                .insert(id.clone(), UpstreamSession { config, dialect });
         });
 
         Ok(session_exports::Session {
@@ -293,16 +332,13 @@ impl session_exports::Guest for McpBridge {
     }
 
     fn close_session(session_id: String) {
-        let upstream = SESSIONS.with(|s| {
-            s.borrow_mut()
-                .remove(&session_id)
-                .and_then(|u| u.upstream_session_id.map(|sid| (u.config, sid)))
-        });
-        if let Some((config, sid)) = upstream {
-            // Fire-and-forget: tell the upstream we're done. close-session
+        let upstream = SESSIONS.with(|s| s.borrow_mut().remove(&session_id));
+        if let Some(upstream) = upstream {
+            // Fire-and-forget: tell the upstream we're done (a no-op in the
+            // modern dialect, which holds no per-client state). close-session
             // is sync per WIT, so we kick this off via wit_bindgen::spawn.
             wit_bindgen::spawn_local(async move {
-                mcp_client::close_upstream(&config, &sid).await;
+                mcp_client::close_upstream(&upstream.config, &upstream.dialect).await;
             });
         }
     }
