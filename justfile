@@ -2,11 +2,7 @@ wasm := "target/wasm32-wasip2/release/mcp_bridge.wasm"
 
 act := env("ACT", "npx @actcore/act")
 actbuild := env("ACT_BUILD", "npx @actcore/act-build")
-hurl := env("HURL", "hurl")
 registry := env("OCI_REGISTRY", "actpkg.dev/library")
-port := `shuf -i 10000-29999 -n 1`
-addr := "[::1]:" + port
-baseurl := "http://" + addr
 
 # Fetch WIT deps from the registry (ghcr.io/actcore) into wit/deps/.
 # wkg-registry.toml maps the act namespace -> actcore.dev (well-known -> ghcr.io/actcore).
@@ -19,9 +15,6 @@ setup: init
 build:
     cargo build --release
     {{actbuild}} pack {{wasm}}
-
-mcpport := `shuf -i 10000-29999 -n 1`
-mcpurl := "http://127.0.0.1:" + mcpport + "/mcp"
 
 # Drive the bridge against the strict dual-dialect stub, once per protocol
 # revision. The stub answers with a JSON-RPC error whenever the bridge sends a
@@ -55,18 +48,7 @@ test-dialects:
     done
 
 test: test-dialects
-    #!/usr/bin/env bash
-    set -euo pipefail
-    PIDS=()
-    trap 'kill "${PIDS[@]}" 2>/dev/null' EXIT
-    npx mcp-proxy --host 0.0.0.0 --port {{mcpport}} --stateless -- npx @trippnology/mcp-server-hello-world &
-    PIDS+=($!)
-    {{act}} run {{wasm}} --http --listen "{{addr}}" --allow wasi:http &
-    PIDS+=($!)
-    # wait for the upstream MCP proxy (tcp) + the bridge's HTTP transport (/info)
-    for _ in $(seq 1 120); do (echo > /dev/tcp/127.0.0.1/{{mcpport}}) >/dev/null 2>&1 && break; sleep 1; done
-    curl --retry 60 --retry-connrefused --retry-delay 1 -fsS -o /dev/null {{baseurl}}/info
-    {{hurl}} --test --variable "baseurl={{baseurl}}" --variable "mcpurl={{mcpurl}}" e2e/*.hurl
+    ACT="{{act}}" uv run --project e2e pytest e2e/ -v
 
 publish:
     #!/usr/bin/env bash
