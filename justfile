@@ -33,14 +33,28 @@ test-dialects:
       for _ in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1 && break; sleep 0.5; done
       sa="{\"url\":\"http://127.0.0.1:$port/mcp\"}"
 
-      out=$({{act}} call {{wasm}} echo --args '{"message":"world"}' --session-args "$sa" --allow wasi:http 2>&1)
+      # act's audit trail (on by default for `run`/`call` since 0.11.0) writes
+      # to stderr unconditionally — not governed by RUST_LOG/-v, only
+      # --no-audit silences it. echo and structured are both success-path
+      # calls whose real output is entirely on stdout (act-cli prints tool
+      # content via `println!`; nothing of interest is on stderr), so these
+      # two capture stdout only rather than folding stderr's audit lines into
+      # the value being compared — the comparison is about what the tool
+      # returned, not what the host logged.
+      out=$({{act}} call {{wasm}} echo --args '{"message":"world"}' --session-args "$sa" --allow wasi:http)
       if [ "$out" != "Hello world" ]; then echo "FAIL[$mode] echo -> $out" >&2; exit 1; fi
 
       # structuredContent leads the event list, CBOR-encoded, ahead of its text mirror.
-      out=$({{act}} call {{wasm}} structured --args '{}' --session-args "$sa" --allow wasi:http 2>&1)
+      out=$({{act}} call {{wasm}} structured --args '{}' --session-args "$sa" --allow wasi:http)
       case "$out" in *22.5*) ;; *) echo "FAIL[$mode] structured -> $out" >&2; exit 1;; esac
 
       # An MRTR result must fail loudly rather than degrade to an empty result.
+      # Unlike the two calls above, this one is expected to fail — and
+      # act-cli prints a failed tool call's "kind: message" to stderr (an
+      # `anyhow` error bubbling out of `main`), not stdout. So this one keeps
+      # 2>&1 on purpose: it needs the stream the other two are deliberately
+      # dropping. The substring match already tolerates the audit lines that
+      # come along with it.
       out=$({{act}} call {{wasm}} needs_input --args '{}' --session-args "$sa" --allow wasi:http 2>&1) || true
       case "$out" in *SEP-2322*) ;; *) echo "FAIL[$mode] needs_input -> $out" >&2; exit 1;; esac
 
