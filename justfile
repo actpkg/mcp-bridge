@@ -26,12 +26,23 @@ test-dialects:
     set -euo pipefail
     PIDS=()
     trap 'kill "${PIDS[@]:-}" 2>/dev/null || true' EXIT
+    # Both dialects over both response encodings. A Streamable HTTP server
+    # may answer a POST with either `application/json` or an event stream,
+    # and the bridge decodes them along entirely separate paths — the SSE
+    # one incrementally, through hclient's event-stream decoder — so a
+    # JSON-only stub leaves half the transport unexercised.
     for mode in legacy modern; do
+     for encoding in json sse; do
       port=$(shuf -i 10000-29999 -n 1)
-      node e2e/stub-mcp-server.mjs --port "$port" --mode "$mode" >/dev/null &
+      sse_flag=()
+      [ "$encoding" = sse ] && sse_flag=(--sse)
+      node e2e/stub-mcp-server.mjs --port "$port" --mode "$mode" "${sse_flag[@]}" >/dev/null &
       PIDS+=($!)
       for _ in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1 && break; sleep 0.5; done
       sa="{\"url\":\"http://127.0.0.1:$port/mcp\"}"
+      # Names the run in failure output; `mode` itself is the loop variable
+      # and must not be reassigned.
+      label="$mode/$encoding"
 
       # act's audit trail (on by default for `run`/`call` since 0.11.0) writes
       # to stderr unconditionally — not governed by RUST_LOG/-v, only
@@ -42,11 +53,11 @@ test-dialects:
       # the value being compared — the comparison is about what the tool
       # returned, not what the host logged.
       out=$({{act}} call {{wasm}} echo --args '{"message":"world"}' --session-args "$sa" --allow wasi:http)
-      if [ "$out" != "Hello world" ]; then echo "FAIL[$mode] echo -> $out" >&2; exit 1; fi
+      if [ "$out" != "Hello world" ]; then echo "FAIL[$label] echo -> $out" >&2; exit 1; fi
 
       # structuredContent leads the event list, CBOR-encoded, ahead of its text mirror.
       out=$({{act}} call {{wasm}} structured --args '{}' --session-args "$sa" --allow wasi:http)
-      case "$out" in *22.5*) ;; *) echo "FAIL[$mode] structured -> $out" >&2; exit 1;; esac
+      case "$out" in *22.5*) ;; *) echo "FAIL[$label] structured -> $out" >&2; exit 1;; esac
 
       # An MRTR result must fail loudly rather than degrade to an empty result.
       # Unlike the two calls above, this one is expected to fail — and
@@ -56,13 +67,21 @@ test-dialects:
       # dropping. The substring match already tolerates the audit lines that
       # come along with it.
       out=$({{act}} call {{wasm}} needs_input --args '{}' --session-args "$sa" --allow wasi:http 2>&1) || true
-      case "$out" in *SEP-2322*) ;; *) echo "FAIL[$mode] needs_input -> $out" >&2; exit 1;; esac
+      case "$out" in *SEP-2322*) ;; *) echo "FAIL[$label] needs_input -> $out" >&2; exit 1;; esac
 
-      echo "ok[$mode]"
+      echo "ok[$label]"
+     done
     done
 
-test: test-dialects
+test: test-unit test-dialects
     ACT="{{act}}" uv run --project e2e pytest e2e/ -v
+
+# Unit tests (creds.rs, mcp_client.rs, mapping.rs). The target has to be
+# named: `.cargo/config.toml` defaults every cargo invocation here to
+# wasm32-wasip2, and nothing on the host can execute a wasm test binary, so a
+# bare `cargo test` fails at exec.
+test-unit:
+    cargo test --target x86_64-unknown-linux-gnu
 
 publish:
     #!/usr/bin/env bash

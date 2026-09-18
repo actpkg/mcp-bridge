@@ -13,7 +13,7 @@ import socket
 import subprocess
 import time
 import pytest
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastmcp import Client
@@ -83,27 +83,32 @@ def _port_open(port: int) -> bool:
 
 
 @pytest.fixture
-def mcp_upstream():
-    """A local upstream MCP server for the bridge to proxy to.
+def stub_server():
+    """The stub-server context manager itself, handed to a test that needs to
+    start one with arguments of its own (`require_token=`).
 
-    `e2e/stub-mcp-server.mjs` is shared with `test-dialects` (not part of
-    this migration — left untouched). It is deliberately strict about the
-    dialect it serves, so any request shape the bridge gets wrong fails
-    loudly rather than passing against a lenient server. Run in `modern`
-    mode; the dialect itself is exercised separately by `test-dialects`, so
-    either mode would do here — `modern` matches the script's own default.
+    A fixture rather than something a test imports from `conftest`: that
+    import only resolves when the test directory happens to be on `sys.path`,
+    which is not something to rely on.
+    """
+    return _stub_server
 
-    Port picked the same way the justfile picks one (`shuf -i 10000-29999
-    -n 1`): above common dev ports, below the Linux ephemeral range. Waits
-    for the port to actually accept connections before yielding — starting
-    the process and hoping for the best cost another component a red CI run
-    on the exact same class of race — and is torn down unconditionally.
+
+@contextmanager
+def _stub_server(require_token: str | None = None):
+    """Run `e2e/stub-mcp-server.mjs` and yield the URL the bridge should use.
+
+    Factored out of `mcp_upstream` so the credential suite can start the same
+    server with `--require-token`, which makes it 401 every request whose
+    `Authorization` header does not match — the probe and the handshake
+    included, which is exactly why the bridge cannot negotiate before it has
+    fetched the credential.
     """
     port = random.randint(10000, 29999)
-    proc = subprocess.Popen(
-        ["node", str(STUB_SERVER), "--port", str(port), "--mode", "modern"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    argv = ["node", str(STUB_SERVER), "--port", str(port), "--mode", "modern"]
+    if require_token is not None:
+        argv += ["--require-token", require_token]
+    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(100):
             if _port_open(port):
@@ -124,14 +129,82 @@ def mcp_upstream():
 
 
 @pytest.fixture
-async def client(act_command: list[str], wasm_path: Path):
+def mcp_upstream():
+    """A local upstream MCP server for the bridge to proxy to.
+
+    `e2e/stub-mcp-server.mjs` is shared with `test-dialects` (not part of
+    this migration — left untouched). It is deliberately strict about the
+    dialect it serves, so any request shape the bridge gets wrong fails
+    loudly rather than passing against a lenient server. Run in `modern`
+    mode; the dialect itself is exercised separately by `test-dialects`, so
+    either mode would do here — `modern` matches the script's own default.
+
+    Port picked the same way the justfile picks one (`shuf -i 10000-29999
+    -n 1`): above common dev ports, below the Linux ephemeral range. Waits
+    for the port to actually accept connections before yielding — starting
+    the process and hoping for the best cost another component a red CI run
+    on the exact same class of race — and is torn down unconditionally.
+    """
+    with _stub_server() as url:
+        yield url
+
+
+@pytest.fixture
+def act_client(act_command: list[str], wasm_path: Path):
+    """Factory for a connected MCP client: `async with act_client(*extra): ...`
+
+    Everything a client needs is here so that a module wanting one more host
+    argument — `--credentials-backend`, say — adds it rather than duplicating
+    the spawn, the connect bound and the stderr redirect.
+
+    `--allow wasi:http --allow act:credentials` are granted unconditionally.
+    The bridge's only job is talking to an upstream MCP server over HTTP, and
+    the credentials class is checked when the component *starts*, not per
+    call — a test that never names a credential still cannot instantiate the
+    guest without it, and the failure would point anywhere but here. The
+    component's own ceiling scopes neither wider than it declares: a bare
+    `act:credentials` table, and `wasi:http` (act.toml).
+    """
+
+    @asynccontextmanager
+    async def _connect(*extra_args: str):
+        transport = StdioTransport(
+            command=act_command[0],
+            args=[
+                *act_command[1:], "run", str(wasm_path), "--mcp",
+                "--allow", "wasi:http", "--allow", "act:credentials",
+                *extra_args,
+            ],
+            keep_alive=False,
+            log_file=LOG_FILE,
+        )
+        async with AsyncExitStack() as stack:
+            # Bound the connect, not the test body. A stalled handshake
+            # otherwise consumes the whole pytest timeout with no diagnostic
+            # at all — which is precisely how the webdriver-bidi CI hang
+            # presented for hours.
+            try:
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    connected = await stack.enter_async_context(Client(transport))
+            except TimeoutError:
+                pytest.fail(
+                    f"MCP client did not connect within {CONNECT_TIMEOUT}s; "
+                    f"act's stderr, if it wrote any, is dumped at session end"
+                )
+            yield connected
+
+    return _connect
+
+
+@pytest.fixture
+async def client(act_client):
     """A connected MCP client, one `act` process per test.
 
-    Every test needs `wasi:http` — the bridge's only job is talking to an
-    upstream MCP server over HTTP — so it is granted uniformly here rather
-    than per-test; unlike `pdf-inspector`, no hurl assertion in this suite
-    exercises the denied-by-default path, so there is nothing to protect by
-    withholding it.
+    No credential store is named, so `get-secret` finds nothing here: that is
+    right for every test that names no `credential_key`, and it is what makes
+    the poisoned-session test able to reach an authenticated upstream with no
+    token at all. The suite that needs a store builds its own client from
+    `act_client`.
 
     Function-scoped, one client per test: a session opened in one test must
     not leak into the next. Within a single test, several calls share the
@@ -139,24 +212,7 @@ async def client(act_command: list[str], wasm_path: Path):
     memory for the process's lifetime, so respawning between calls would
     lose it.
     """
-    transport = StdioTransport(
-        command=act_command[0],
-        args=[*act_command[1:], "run", str(wasm_path), "--mcp", "--allow", "wasi:http"],
-        keep_alive=False,
-        log_file=LOG_FILE,
-    )
-    async with AsyncExitStack() as stack:
-        # Bound the connect, not the test body. A stalled handshake otherwise
-        # consumes the whole pytest timeout with no diagnostic at all — which
-        # is precisely how the webdriver-bidi CI hang presented for hours.
-        try:
-            async with asyncio.timeout(CONNECT_TIMEOUT):
-                connected = await stack.enter_async_context(Client(transport))
-        except TimeoutError:
-            pytest.fail(
-                f"MCP client did not connect within {CONNECT_TIMEOUT}s; "
-                f"act's stderr, if it wrote any, is dumped at session end"
-            )
+    async with act_client() as connected:
         yield connected
 
 

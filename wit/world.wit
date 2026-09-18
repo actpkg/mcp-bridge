@@ -1,6 +1,16 @@
 package component:impl;
 
 world component-world {
+  // Host-provided: the component imports it and calls out. Opt-in in both
+  // directions — it is declared in act.toml as well, and an undeclared class
+  // is denied outright, so without both halves every get-secret is refused
+  // and no grant can widen it.
+  //
+  // `get-secret` needs a *live* session, and the host marks a session live
+  // only after `open-session` returns (ACT-AUTH §1.1.4) — which is why this
+  // bridge fetches its bearer on the first tool call, never at open.
+  import act:credentials/store@0.1.0;
+
   export act:tools/tool-provider@0.2.0;
   export act:sessions/session-provider@0.2.0;
 }

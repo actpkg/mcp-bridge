@@ -5,3 +5,17 @@ name = "mcp-bridge"
 
 [[std.capabilities."wasi:http".allow]]
 host = "*"
+
+# Bare table, as the credentials spec prescribes — the class carries no
+# constraints. An undeclared class is always denied and no grant can widen it,
+# so without this the bridge cannot reach the credential store however it is
+# run.
+#
+# There is deliberately no `[[std.credentials]]` declaration. A declaration
+# exists so `act login` can prompt for a component's fields without the user
+# knowing what they are — and a bridge's credential set is open by nature
+# (ACT-AUTH §1.1.8 names exactly this case): the key is whatever the operator
+# chose in `credential_key`, and the field is `mcp:token` or `mcp:oauth`
+# depending on which kind of token they hold. Declaring one key would prompt
+# for a credential this component may never ask for.
+[std.capabilities."act:credentials"]

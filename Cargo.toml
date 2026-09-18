@@ -1,19 +1,65 @@
 [package]
 name = "mcp-bridge"
 description = "Proxies a remote MCP server's tools as ACT tools"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
-wit-bindgen = { version = "0.60", features = ["async-spawn"] }
-wasi-fetch = "0.2.0"
+# A direct dep because this is a hand-rolled bridge, not an SDK-macro
+# component: `lib.rs` calls `wit_bindgen::generate!` and `spawn_local` itself.
+#
+# **The graph carries two wit-bindgen majors, and that is expected.** Published
+# `act-sdk` 0.14.1 pins 0.60; `hclient-wasi` 0.1.0 reaches 0.62 through
+# `wasip3` 0.9. Both compile, only the macro crates are duplicated (they are
+# build-time, so the artifact is unaffected), and every sibling component using
+# `hclient` shows the same split. act-sdk's own tree has already moved to 0.62,
+# so the duplication collapses when the next SDK release lands — it is not
+# something to pin around here.
+wit-bindgen = { version = "0.62", features = ["async-spawn"] }
+# `default-features = false` keeps the IDN/ICU chain (a `default` feature) out
+# of the wasm binary; nothing here feeds a non-ASCII host to the client. SSE
+# and incremental body reads are unconditional in `hclient`, so streaming the
+# Streamable-HTTP transport costs no feature.
+#
+# **The family does not move in lockstep, and must not be "corrected".** The
+# lock holds `hclient` alpha.13, `hclient-proto` alpha.8, and both
+# `hclient-core` and `hclient-wasi` at **0.1.0** — stable. The split is exactly
+# the `hclient-proto` edge: a crate cannot leave prerelease while a prerelease
+# dependency sits in its public path, and `hclient-wasi` depends only on
+# `hclient-core`, so nothing held it back. Hence `hclient-wasi = "0.1.0"` is an
+# ordinary caret requirement here, not a prerelease string. Bump all four by
+# name out of habit — it costs nothing and localises an upstream regression:
+#   cargo update -p hclient -p hclient-wasi -p hclient-core -p hclient-proto
+#
+# **alpha.10 -> alpha.13 was a lockfile-only change for this component.** It is
+# not free of hazard, though: alpha.13 changed `ClientBuilder::build()` from
+# `Result<Client, UnsupportedCapability>` to `Result<Client, BuildError>`, a
+# new enum wrapping the old type alongside an `InvalidCodingToken` variant.
+# `client()` in `mcp_client.rs` writes `.map_err(|e| ... format!("{e}"))`, which
+# is `Display`-based and absorbed the change silently — had it named or matched
+# the type, this would have been a source break inside a `cargo update`.
+# `InvalidCodingToken` is unreachable here (decompression is never negotiated),
+# but the error is a sum type now and a future reader should know it.
+#
+# The API this component names is facade-only — `Client`, `RequestBody`,
+# `Response`, `Timeouts`, `sse::{SseStream, SseEvent}`, `WasiHttp` — and
+# `hclient_core` appears nowhere in `src/`. Most of those re-export from
+# `hclient-core`, which is stable, so they now move under semver rather than
+# between prereleases. `Timeouts` stays the exception worth watching: it is
+# `#[non_exhaustive]`, so a fifth bound is not a breaking change upstream and
+# semver will not announce it — `timeouts()` sets `connect` and `first_byte`
+# and deliberately leaves `between_bytes` unbounded for the SSE leg.
+hclient = { version = "0.1.0-alpha.13", default-features = false }
+hclient-wasi = "0.1.0"
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
-act-types = "0.12"
+act-types = "0.14.1"
+act-sdk = "0.14.1"
 ciborium = "0.2"
-base64 = "0.22"
-rmcp = { version = "3.1", default-features = false }
+base64 = "0.23"
+rmcp = { version = "3.4", default-features = false }
 
 [profile.release]
 lto = "fat"

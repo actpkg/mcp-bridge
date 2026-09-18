@@ -42,6 +42,12 @@ jobs:
       - run: cargo fmt -- --check
       - run: just init
       - run: cargo clippy -- -D warnings
+      # The target has to be named. `.cargo/config.toml` defaults every cargo
+      # invocation here to wasm32-wasip2, and nothing on the runner can
+      # execute a wasm test binary, so a bare `cargo test` fails at exec.
+      # These are the tests that assert the open-args schema offers nowhere
+      # to put a token, so they must run somewhere that blocks a merge.
+      - run: cargo test --target x86_64-unknown-linux-gnu
 
   e2e:
     name: E2E Test

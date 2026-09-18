@@ -10,10 +10,34 @@
 //! `Mcp-Session-Id` header (ACT-SESSIONS §3.2). Against a **modern**
 //! (`2026-07-28`) server there is no upstream session to NAT — SEP-2575
 //! removed protocol-level sessions — so the ACT session carries only the
-//! per-client config (url, auth token) that ACT-AUTH puts in session args.
+//! per-client config (url, credential key) it was opened with.
+//!
+//! # Where the credential comes from, and when
+//!
+//! The bearer token is **not** a session argument. It lives in the host's
+//! credential store, is named by `credential_key` in the session args, and is
+//! fetched with `act:credentials/store` — so it never passes through the
+//! agent's context (ACT-AUTH §1.1). `credential_key` is optional: a bridge
+//! pointed at an unauthenticated MCP server names none and nothing is
+//! fetched.
+//!
+//! That moves the upstream handshake. `get-secret` requires a **live**
+//! session, and the host marks a session live only *after* `open-session`
+//! returns (ACT-AUTH §1.1.4), so the credential cannot be read at open — and
+//! the dialect probe has to carry it, because an authenticated server answers
+//! an unauthenticated `initialize` with a 401. Both therefore happen lazily,
+//! on the first tool call, and are cached for the session's lifetime
+//! ([`ensure_upstream`]).
+//!
+//! `open-session` consequently no longer reports a bad URL, a 401 or a
+//! protocol mismatch: it validates its arguments and returns an id, and the
+//! *first tool call* is where the upstream is reached. ACT-AUTH §1.1.4 states
+//! the trade explicitly — "a component that would otherwise fail fast at open
+//! time trades that for a first-call failure".
 
 #![allow(clippy::all)]
 
+mod creds;
 mod mapping;
 mod mcp_client;
 
@@ -33,15 +57,41 @@ use exports::act::tools::tool_provider as tool_exports;
 // export module no longer re-exports these, so reference them directly.
 use act::core::types::LocalizedString;
 use act::tools::types::ToolDefinition;
+use creds::Bearer;
 use mcp_client::{Config, Dialect, McpError};
 
 // ── Per-session state ──────────────────────────────────────────────────────
 
 struct UpstreamSession {
     config: Config,
+    /// Filled on the first tool call, never at open: the credential cannot be
+    /// fetched until the session is live (ACT-AUTH §1.1.4), and the dialect
+    /// probe has to carry it.
+    upstream: Option<Upstream>,
+    /// The refusal a poisoned session answers with.
+    ///
+    /// Set when the credential was refused — by the host (denied, absent,
+    /// unreadable, expired) or by the upstream (401/403). None of those change
+    /// within a session: the key is fixed at open and the host does not
+    /// refresh a stored token. Without this the next tool call repeats the
+    /// whole sequence *including `get-secret`*, which can put a consent prompt
+    /// in front of a human on every single call.
+    ///
+    /// The original error is kept rather than a bool plus a generic sentence,
+    /// so the second call says exactly what the first one did — including the
+    /// command that fixes it.
+    rejected: Option<McpError>,
+}
+
+/// What one successful first call bought, kept for the session's lifetime.
+#[derive(Clone)]
+struct Upstream {
     /// Wire dialect negotiated with this upstream, plus whatever per-dialect
     /// state it implies (the legacy `Mcp-Session-Id`, if the server issued one).
     dialect: Dialect,
+    /// `None` when the session named no `credential_key` — an unauthenticated
+    /// upstream, and no `Authorization` header is sent at all.
+    auth: Option<Bearer>,
 }
 
 thread_local! {
@@ -57,13 +107,147 @@ fn alloc_session_id() -> String {
     })
 }
 
-/// Snapshot the per-session pieces needed to dispatch a request.
-fn snapshot_session(session_id: &str) -> Option<(Config, Dialect)> {
-    SESSIONS.with(|s| {
+/// Snapshot the per-session pieces needed to dispatch a request, connecting
+/// to the upstream first if this is the session's first call.
+///
+/// Idempotent: a session that already has an [`Upstream`] touches neither the
+/// credential store nor the network.
+///
+/// **Not de-duplicated across concurrent first calls.** Two calls that arrive
+/// before either has connected both run the whole sequence, and the second
+/// overwrites the first's cache with an equivalent one. The fix is a
+/// per-session in-flight latch, which is more state for a race no MCP or HTTP
+/// client in this workspace can currently produce — both are
+/// request/response.
+async fn ensure_upstream(session_id: &str) -> Result<(Config, Upstream), McpError> {
+    let Some((config, cached, rejected)) = SESSIONS.with(|s| {
         s.borrow()
             .get(session_id)
-            .map(|u| (u.config.clone(), u.dialect.clone()))
-    })
+            .map(|u| (u.config.clone(), u.upstream.clone(), u.rejected.clone()))
+    }) else {
+        return Err(unknown_session(session_id));
+    };
+    if let Some(upstream) = cached {
+        return Ok((config, upstream));
+    }
+    // Before the store, not after: the whole point of the flag is that
+    // `get-secret` is never reached a second time.
+    if let Some(refusal) = rejected {
+        return Err(refusal);
+    }
+
+    let connected = connect(session_id, &config).await;
+    let upstream = match connected {
+        Ok(upstream) => upstream,
+        Err(e) => {
+            note_refusal(session_id, &e);
+            return Err(e);
+        }
+    };
+    SESSIONS.with(|s| {
+        if let Some(entry) = s.borrow_mut().get_mut(session_id) {
+            entry.upstream = Some(upstream.clone());
+        }
+    });
+    Ok((config, upstream))
+}
+
+/// Fetch the credential (when one is named) and negotiate the dialect.
+async fn connect(session_id: &str, config: &Config) -> Result<Upstream, McpError> {
+    let auth = match &config.credential_key {
+        Some(key) => Some(fetch_bearer(session_id, config, key).await?),
+        None => None,
+    };
+    let dialect = mcp_client::negotiate(config, auth.as_ref()).await?;
+    Ok(Upstream { dialect, auth })
+}
+
+/// Poison the session when the failure is one that cannot change within it.
+/// A transport failure or a timeout is left alone — those do change on their
+/// own, and retrying them costs no consent prompt.
+fn note_refusal(session_id: &str, e: &McpError) {
+    if !e.poisons_the_session() {
+        return;
+    }
+    SESSIONS.with(|s| {
+        if let Some(entry) = s.borrow_mut().get_mut(session_id) {
+            entry.rejected.get_or_insert_with(|| e.clone());
+        }
+    });
+}
+
+/// Ask the host credential store for this session's bearer token.
+///
+/// Depends on **field names only** — the two `creds` declares — because no
+/// field name is well-known (`ACT-CONSTANTS.md` §8.2 registers types, not
+/// names). `secret-request.kind` is left `None`: it names nothing under the
+/// current model and MUST NOT filter retrieval (ACT-AUTH §1.1.6).
+async fn fetch_bearer(session_id: &str, config: &Config, key: &str) -> Result<Bearer, McpError> {
+    let want = act::credentials::types::SecretRequest {
+        key: key.to_string(),
+        kind: None,
+        // Scheme and authority only — see `Config::resource`.
+        resource: Some(config.resource()),
+        scopes: vec![],
+        hint: Some("Bearer token for the upstream MCP server".to_string()),
+    };
+
+    let raw = match act::credentials::store::get_secret(session_id.to_string(), want).await {
+        Ok(raw) => raw,
+        Err(e) => return Err(secret_error(e, key).await),
+    };
+    // Values cross as CBOR; `from_wit` decodes the field map. Its error names
+    // the field and never its bytes.
+    let secret = act_sdk::credentials::Secret::from_wit(raw.kind, raw.fields)
+        .map_err(|e| McpError::internal(format!("credential field decode failed: {e}")))?;
+    creds::bearer_from_secret(&secret, key, now_unix())
+}
+
+/// Unix seconds, or `0` when the host will not say — see
+/// `creds::bearer_from_secret`, which treats `0` as "expiry unknowable"
+/// rather than "everything is expired".
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Map a store refusal onto the error the agent sees.
+///
+/// `not-found` and `denied` collapse into one message on purpose: the host
+/// decides `denied` **before** it consults the store (ACT-AUTH §1.1.7), so
+/// distinguishing them here would invent a difference the host refuses to
+/// disclose — and would turn the pair into a way to probe a profile for keys.
+async fn secret_error(e: act::credentials::types::SecretError, key: &str) -> McpError {
+    use act::credentials::types::SecretError;
+    match e {
+        SecretError::NotFound | SecretError::Denied => {
+            // Best-effort: a policy that denies the store denies the listing
+            // too, and then the message simply carries no inventory. Keys are
+            // not secret — `list-secrets` exists to hand them to the agent.
+            let known: Vec<String> = act::credentials::store::list_secrets(None)
+                .await
+                .map(|v| v.into_iter().map(|i| i.key).collect())
+                .unwrap_or_default();
+            creds::credential_missing(key, &known)
+        }
+        SecretError::InvalidSession => McpError {
+            kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
+            message: "the credential store does not recognise this session; open a new one"
+                .to_string(),
+        },
+        SecretError::Unavailable(msg) => {
+            McpError::internal(format!("the credential store is unavailable: {msg}"))
+        }
+    }
+}
+
+fn unknown_session(session_id: &str) -> McpError {
+    McpError {
+        kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
+        message: format!("Unknown session-id: {session_id}"),
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -86,14 +270,6 @@ fn invalid_args(msg: impl Into<String>) -> tool_exports::Error {
     tool_exports::Error {
         kind: act_types::constants::ERR_INVALID_ARGS.to_string(),
         message: LocalizedString::Plain(msg.into()),
-        metadata: vec![],
-    }
-}
-
-fn session_not_found(session_id: &str) -> tool_exports::Error {
-    tool_exports::Error {
-        kind: act_types::constants::ERR_SESSION_NOT_FOUND.to_string(),
-        message: LocalizedString::Plain(format!("Unknown session-id: {session_id}")),
         metadata: vec![],
     }
 }
@@ -128,15 +304,21 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let (config, dialect) = match snapshot_session(&session_id) {
-            Some(s) => s,
-            None => return Err(session_not_found(&session_id)),
-        };
+        // First call on this session: fetch the credential and negotiate.
+        let (config, upstream) = ensure_upstream(&session_id)
+            .await
+            .map_err(|e| mcp_to_wit_error(&e))?;
 
-        let result =
-            mcp_client::mcp_request(&config, &dialect, "tools/list", serde_json::json!({}))
-                .await
-                .map_err(|e| mcp_to_wit_error(&e))?;
+        let result = mcp_client::mcp_request(
+            &config,
+            upstream.auth.as_ref(),
+            &upstream.dialect,
+            "tools/list",
+            serde_json::json!({}),
+        )
+        .await
+        .inspect_err(|e| note_refusal(&session_id, e))
+        .map_err(|e| mcp_to_wit_error(&e))?;
 
         let list_result: rmcp::model::ListToolsResult =
             serde_json::from_value(result).map_err(|e| {
@@ -171,11 +353,12 @@ impl tool_exports::Guest for McpBridge {
             }
         };
 
-        let (config, dialect) = match snapshot_session(&session_id) {
-            Some(s) => s,
-            None => {
+        // First call on this session: fetch the credential and negotiate.
+        let (config, upstream) = match ensure_upstream(&session_id).await {
+            Ok(pair) => pair,
+            Err(e) => {
                 return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
-                    session_not_found(&session_id),
+                    mcp_to_wit_error(&e),
                 )]);
             }
         };
@@ -206,7 +389,8 @@ impl tool_exports::Guest for McpBridge {
 
         let result = match mcp_client::mcp_request(
             &config,
-            &dialect,
+            upstream.auth.as_ref(),
+            &upstream.dialect,
             "tools/call",
             serde_json::to_value(&params).unwrap_or_default(),
         )
@@ -214,6 +398,9 @@ impl tool_exports::Guest for McpBridge {
         {
             Ok(r) => r,
             Err(e) => {
+                // A 401 mid-session poisons it too: the key is fixed at open,
+                // so nothing this session can do will change the answer.
+                note_refusal(&session_id, &e);
                 return tool_exports::ToolResult::Immediate(vec![tool_exports::ToolEvent::Error(
                     mcp_to_wit_error(&e),
                 )]);
@@ -308,21 +495,32 @@ impl session_exports::Guest for McpBridge {
                 }
             })?;
 
-        // Negotiate the dialect up front — failure surfaces as a proper
-        // session-open error so the agent sees auth / connect / protocol
-        // problems before a session-id is issued (per ACT-SESSIONS §2.2).
-        let dialect = mcp_client::negotiate(&config)
-            .await
-            .map_err(|e| session_exports::Error {
-                kind: e.kind.clone(),
-                message: LocalizedString::Plain(e.message.clone()),
-                metadata: vec![],
-            })?;
+        // Everything that can be decided without the network or the store:
+        // the URL must be an address and must not carry userinfo, and
+        // `credential_key` must be a lookup name rather than a sentence — the
+        // host pastes it raw into the line a human reads when releasing a
+        // credential.
+        //
+        // The upstream is deliberately NOT contacted here. Negotiation needs
+        // the bearer token, and the token cannot be fetched until this call
+        // has returned and the host has marked the session live (ACT-AUTH
+        // §1.1.4). See `ensure_upstream`.
+        config.validate().map_err(|e| session_exports::Error {
+            kind: e.kind.clone(),
+            message: LocalizedString::Plain(e.message.clone()),
+            metadata: vec![],
+        })?;
 
         let id = alloc_session_id();
         SESSIONS.with(|s| {
-            s.borrow_mut()
-                .insert(id.clone(), UpstreamSession { config, dialect });
+            s.borrow_mut().insert(
+                id.clone(),
+                UpstreamSession {
+                    config,
+                    upstream: None,
+                    rejected: None,
+                },
+            );
         });
 
         Ok(session_exports::Session {
@@ -332,13 +530,21 @@ impl session_exports::Guest for McpBridge {
     }
 
     fn close_session(session_id: String) {
-        let upstream = SESSIONS.with(|s| s.borrow_mut().remove(&session_id));
-        if let Some(upstream) = upstream {
+        let session = SESSIONS.with(|s| s.borrow_mut().remove(&session_id));
+        // Nothing to tear down for a session that never reached the upstream:
+        // no dialect was negotiated, so no upstream state exists.
+        if let Some(UpstreamSession {
+            config,
+            upstream: Some(upstream),
+            ..
+        }) = session
+        {
             // Fire-and-forget: tell the upstream we're done (a no-op in the
             // modern dialect, which holds no per-client state). close-session
             // is sync per WIT, so we kick this off via wit_bindgen::spawn.
             wit_bindgen::spawn_local(async move {
-                mcp_client::close_upstream(&upstream.config, &upstream.dialect).await;
+                mcp_client::close_upstream(&config, upstream.auth.as_ref(), &upstream.dialect)
+                    .await;
             });
         }
     }

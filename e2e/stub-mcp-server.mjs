@@ -2,6 +2,7 @@
 // dialects the bridge speaks. No dependencies — plain node:http.
 //
 //   node stub-mcp-server.mjs --port <n> --mode legacy|modern
+//                             [--require-token <bearer>] [--sse]
 //
 // The stub is deliberately strict: whenever the bridge sends a request that
 // does not match the dialect it negotiated, the stub answers with a JSON-RPC
@@ -15,6 +16,24 @@
 //     then requires the SEP-2243 `Mcp-Method` / `Mcp-Name` headers and the
 //     SEP-2575 `_meta` keys on every request, and rejects a request that
 //     carries an `Mcp-Session-Id` at all.
+//
+// `--require-token` makes the stub answer 401 to any request whose
+// `Authorization` header is not exactly `Bearer <token>` — including the
+// dialect probe, which is why the bridge cannot negotiate before it has the
+// credential. Absent, no request is checked and the stub is an
+// unauthenticated server.
+//
+// `--sse` answers every JSON-RPC request as `text/event-stream` instead of
+// `application/json` — the other half of the Streamable HTTP transport, and
+// the half a JSON-only stub never reaches. It is deliberately awkward about
+// it, in the three ways a real server is:
+//
+//   - a keep-alive comment precedes the data event, so a client that treats
+//     the first event block as the answer reads a comment as the response;
+//   - the event is written across several chunks that split mid-`data:`
+//     line, so a client that assumes one chunk is one event truncates it;
+//   - the stream is left OPEN afterwards, so a client that drains to EOF
+//     before parsing hangs until the test times out.
 
 import { createServer } from "node:http";
 
@@ -25,6 +44,8 @@ const argOf = (name, fallback) => {
 };
 const PORT = Number(argOf("--port", "0"));
 const MODE = argOf("--mode", "modern");
+const REQUIRE_TOKEN = argOf("--require-token", null);
+const SSE = args.includes("--sse");
 const SESSION_ID = "stub-session-1";
 const MODERN_VERSION = "2026-07-28";
 const LEGACY_VERSION = "2025-11-25";
@@ -200,7 +221,41 @@ function handle(body, headers, res) {
   return err(id, -32601, `Method not found: ${method}`);
 }
 
+/// Write one JSON-RPC response as an event stream, the awkward way a real
+/// server does (see `--sse` above). The charset parameter is on the content
+/// type deliberately: a client matching the media type by equality against
+/// the whole header value would miss it.
+function writeSse(res, payload) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+  });
+  // A keep-alive comment first — its own event block, carrying no data.
+  res.write(": keep-alive\n\n");
+  // Then the answer, split at a point that falls inside the `data:` line.
+  const framed = `event: message\ndata: ${payload}\n\n`;
+  const cut = Math.min(framed.indexOf("data:") + 12, framed.length);
+  res.write(framed.slice(0, cut));
+  setTimeout(() => {
+    res.write(framed.slice(cut));
+    // The stream stays open on purpose: the bridge must return as soon as
+    // it has the event, not wait for EOF. The socket is closed when the
+    // client hangs up, or when the stub exits at the end of the test.
+  }, 10);
+}
+
 createServer((req, res) => {
+  // Checked before anything else, exactly as a real authenticated server
+  // does: the probe and the handshake are refused too, not only tools/call.
+  // The body says nothing about what was received — echoing an Authorization
+  // header back is how a token ends up in a transcript.
+  if (REQUIRE_TOKEN !== null && req.headers.authorization !== `Bearer ${REQUIRE_TOKEN}`) {
+    res
+      .writeHead(401, { "content-type": "application/json", "www-authenticate": "Bearer" })
+      .end(JSON.stringify({ error: "unauthorized" }));
+    return;
+  }
   if (req.method === "DELETE") {
     res.writeHead(204).end();
     return;
@@ -221,6 +276,10 @@ createServer((req, res) => {
       return;
     }
     const payload = JSON.stringify(response);
+    if (SSE) {
+      writeSse(res, payload);
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" }).end(payload);
   });
 }).listen(PORT, "127.0.0.1", () => {
