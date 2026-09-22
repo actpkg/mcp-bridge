@@ -22,12 +22,12 @@ wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 # Streamable-HTTP transport costs no feature.
 #
 # **The family does not move in lockstep, and must not be "corrected".** The
-# lock holds `hclient` alpha.13, `hclient-proto` alpha.8, and both
-# `hclient-core` and `hclient-wasi` at **0.1.0** — stable. The split is exactly
-# the `hclient-proto` edge: a crate cannot leave prerelease while a prerelease
-# dependency sits in its public path, and `hclient-wasi` depends only on
-# `hclient-core`, so nothing held it back. Hence `hclient-wasi = "0.1.0"` is an
-# ordinary caret requirement here, not a prerelease string. Bump all four by
+# lock holds `hclient` alpha.14, `hclient-proto` alpha.8, `hclient-core`
+# **0.1.0** and `hclient-wasi` **0.1.1** — the last two stable. The split is
+# exactly the `hclient-proto` edge: a crate cannot leave prerelease while a
+# prerelease dependency sits in its public path, and `hclient-wasi` depends only
+# on `hclient-core`, so nothing held it back. Hence `hclient-wasi = "0.1.1"` is
+# an ordinary caret requirement here, not a prerelease string. Bump all four by
 # name out of habit — it costs nothing and localises an upstream regression:
 #   cargo update -p hclient -p hclient-wasi -p hclient-core -p hclient-proto
 #
@@ -41,16 +41,31 @@ wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 # `InvalidCodingToken` is unreachable here (decompression is never negotiated),
 # but the error is a sum type now and a future reader should know it.
 #
+# **alpha.13 -> alpha.14 changed nothing that reaches this component, and the
+# check is cheap enough to repeat.** `hclient`'s own `src/` is byte-identical
+# across the two releases (`diff -rq` over the vendored copies says so); the
+# release only raises its internal requirements, one of which — `hclient-rt` —
+# graduated to a stable 0.1.0. `hclient-wasi` 0.1.0 -> 0.1.1 is likewise
+# source-identical. The changelog's sole entry is marked **breaking**, which is
+# alarming until you read it: it is `hclient-dns` leaving the pre-release
+# series, and `hclient-dns` is **not in this graph at all** — `default-features
+# = false` keeps the native transport out and `WasiHttp` resolves its own names.
+# A `[**breaking**]` line in this family's changelog is therefore not by itself
+# a reason to expect work here; check whether the named crate is in `Cargo.lock`
+# first.
+#
 # The API this component names is facade-only — `Client`, `RequestBody`,
 # `Response`, `Timeouts`, `sse::{SseStream, SseEvent}`, `WasiHttp` — and
 # `hclient_core` appears nowhere in `src/`. Most of those re-export from
-# `hclient-core`, which is stable, so they now move under semver rather than
-# between prereleases. `Timeouts` stays the exception worth watching: it is
+# `hclient-core`, which is stable and did not move this round (still 0.1.0), so
+# they travel under semver rather than between prereleases. `Timeouts` stays
+# the exception worth watching — re-verified at alpha.14, still four bounds: it
+# is
 # `#[non_exhaustive]`, so a fifth bound is not a breaking change upstream and
 # semver will not announce it — `timeouts()` sets `connect` and `first_byte`
 # and deliberately leaves `between_bytes` unbounded for the SSE leg.
-hclient = { version = "0.1.0-alpha.13", default-features = false }
-hclient-wasi = "0.1.0"
+hclient = { version = "0.1.0-alpha.14", default-features = false }
+hclient-wasi = "0.1.1"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

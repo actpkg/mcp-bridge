@@ -466,9 +466,9 @@ dependencies = [
 
 [[package]]
 name = "hclient"
-version = "0.1.0-alpha.13"
+version = "0.1.0-alpha.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a18074e988d138117d1f06d311c8e07fa958157feab6b99c0281b7448aa008b1"
+checksum = "370a930764aed9a4c116b044be67af8997beef3a38d0c54371ef056fb5f6178e"
 dependencies = [
  "bytes",
  "const-hex",
@@ -513,9 +513,9 @@ dependencies = [
 
 [[package]]
 name = "hclient-wasi"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03ad55b26486b58b9f39e99bc81fc97e785c1999d06aced6c7866f567307e7e8"
+checksum = "fc03d9ffca534ec2c980d5660bdc6f15958dd4c2c52882275ac34858a05ec562"
 dependencies = [
  "bytes",
  "futures",
