@@ -8,13 +8,11 @@ edition = "2024"
 # A direct dep because this is a hand-rolled bridge, not an SDK-macro
 # component: `lib.rs` calls `wit_bindgen::generate!` and `spawn_local` itself.
 #
-# **The graph carries two wit-bindgen majors, and that is expected.** Published
-# `act-sdk` 0.14.1 pins 0.60; `hclient-wasi` 0.1.0 reaches 0.62 through
-# `wasip3` 0.9. Both compile, only the macro crates are duplicated (they are
-# build-time, so the artifact is unaffected), and every sibling component using
-# `hclient` shows the same split. act-sdk's own tree has already moved to 0.62,
-# so the duplication collapses when the next SDK release lands — it is not
-# something to pin around here.
+# The graph carried two wit-bindgen majors for a while (published `act-sdk`
+# pinned 0.60 while `hclient-wasi` reached 0.62 through `wasip3`) — noted here
+# as something to watch, not fix. It collapsed to a single 0.62.0 on its own at
+# `act-sdk` 0.14.2, exactly as expected. Nothing to do; left as a worked example
+# of a duplication that was fine to leave alone.
 wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 # `default-features = false` keeps the IDN/ICU chain (a `default` feature) out
 # of the wasm binary; nothing here feeds a non-ASCII host to the client. SSE
@@ -22,14 +20,27 @@ wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 # Streamable-HTTP transport costs no feature.
 #
 # **The family does not move in lockstep, and must not be "corrected".** The
-# lock holds `hclient` alpha.14, `hclient-proto` alpha.8, `hclient-core`
-# **0.1.0** and `hclient-wasi` **0.1.1** — the last two stable. The split is
-# exactly the `hclient-proto` edge: a crate cannot leave prerelease while a
-# prerelease dependency sits in its public path, and `hclient-wasi` depends only
-# on `hclient-core`, so nothing held it back. Hence `hclient-wasi = "0.1.1"` is
-# an ordinary caret requirement here, not a prerelease string. Bump all four by
-# name out of habit — it costs nothing and localises an upstream regression:
+# lock holds `hclient` alpha.15, `hclient-proto` alpha.8, `hclient-core`
+# **0.2.1** and `hclient-wasi` **0.1.2**. Bump all four by name out of habit —
+# it costs nothing and localises an upstream regression:
 #   cargo update -p hclient -p hclient-wasi -p hclient-core -p hclient-proto
+#
+# **The "can't leave prerelease while a prerelease dep is in the public path"
+# theory this note used to state is WRONG — corrected 2026-09-25.** It held
+# only for `hclient-core`'s *first* graduation to `0.1.0`; `hclient-core` has
+# since done an independent `0.1.0 -> 0.2.1` jump of its own; `hclient` is
+# still alpha.15 and `hclient-proto` still alpha.8. So the four crates version
+# independently once past the seam, full stop — do not reconstruct a rule from
+# which ones happen to be stable this week.
+#
+# **`hclient-core` 0.2.0's changelog carries several `[**breaking**]` entries**
+# (IPC as its own trait, `MemoryStore` dropped, the three support-report shapes
+# unified) and none of it reached this component: build, clippy, 66 unit tests
+# and all 14 e2e tests (real HTTP/SSE against the stub server) passed unchanged
+# against 0.2.1. A breaking changelog entry upstream is a reason to build and
+# test before trusting the bump, not a reason to expect a source change — check
+# whether the changed surface is even in `Cargo.lock` (as with `hclient-dns`
+# below) before assuming it applies.
 #
 # **alpha.10 -> alpha.13 was a lockfile-only change for this component.** It is
 # not free of hazard, though: alpha.13 changed `ClientBuilder::build()` from
@@ -57,24 +68,24 @@ wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 # The API this component names is facade-only — `Client`, `RequestBody`,
 # `Response`, `Timeouts`, `sse::{SseStream, SseEvent}`, `WasiHttp` — and
 # `hclient_core` appears nowhere in `src/`. Most of those re-export from
-# `hclient-core`, which is stable and did not move this round (still 0.1.0), so
-# they travel under semver rather than between prereleases. `Timeouts` stays
-# the exception worth watching — re-verified at alpha.14, still four bounds: it
-# is
+# `hclient-core`, so they travel under whatever semver `hclient-core` is
+# currently keeping (0.x, so a minor bump there can be breaking — see the
+# 0.2.0 note above). `Timeouts` stays the exception worth watching —
+# re-verified at `hclient-core` 0.2.1, still four bounds, still
 # `#[non_exhaustive]`, so a fifth bound is not a breaking change upstream and
 # semver will not announce it — `timeouts()` sets `connect` and `first_byte`
 # and deliberately leaves `between_bytes` unbounded for the SSE leg.
-hclient = { version = "0.1.0-alpha.14", default-features = false }
-hclient-wasi = "0.1.1"
+hclient = { version = "0.1.0-alpha.15", default-features = false }
+hclient-wasi = "0.1.2"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
-act-types = "0.14.1"
-act-sdk = "0.14.1"
+act-types = "0.14.2"
+act-sdk = "0.14.2"
 ciborium = "0.2"
 base64 = "0.23"
-rmcp = { version = "3.4", default-features = false }
+rmcp = { version = "3.4.1", default-features = false }
 
 [profile.release]
 lto = "fat"
