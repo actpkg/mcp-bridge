@@ -488,31 +488,6 @@ pub async fn mcp_request(
     parse_jsonrpc(&resp.body)
 }
 
-/// Best-effort upstream teardown. Only the legacy dialect has anything to
-/// tear down — a modern server holds no per-client state to release. Cleanup
-/// errors are swallowed by design: `close-session` is advisory in WIT.
-pub async fn close_upstream(config: &Config, auth: Option<&Bearer>, dialect: &Dialect) {
-    let Dialect::Legacy {
-        version,
-        session_id: Some(session_id),
-    } = dialect
-    else {
-        return;
-    };
-
-    let Ok(client) = client() else { return };
-    let mut builder = client
-        .delete(&config.url)
-        .header("accept", "application/json")
-        .header(SESSION_HEADER, session_id)
-        .header(PROTOCOL_VERSION_HEADER, version.as_str())
-        .timeouts(timeouts(5));
-    if let Some(auth) = auth {
-        builder = builder.header("authorization", &auth.header_value());
-    }
-    let _ = builder.send().await;
-}
-
 // ── JSON-RPC envelope ──────────────────────────────────────────────────────
 
 fn envelope(method: &str, params: &Value) -> Value {

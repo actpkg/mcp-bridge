@@ -27,7 +27,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: component.wasm
-          path: target/wasm32-wasip2/release/*.wasm
+          path: target/wasm32-wasip3/release/*.wasm
 
   lint:
     name: Lint
@@ -43,7 +43,7 @@ jobs:
       - run: just init
       - run: cargo clippy -- -D warnings
       # The target has to be named. `.cargo/config.toml` defaults every cargo
-      # invocation here to wasm32-wasip2, and nothing on the runner can
+      # invocation here to wasm32-wasip3, and nothing on the runner can
       # execute a wasm test binary, so a bare `cargo test` fails at exec.
       # These are the tests that assert the open-args schema offers nowhere
       # to put a token, so they must run somewhere that blocks a merge.
@@ -58,13 +58,12 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: component.wasm
-          path: target/wasm32-wasip2/release/
+          path: target/wasm32-wasip3/release/
       - uses: moonrepo/setup-rust@v1
         with:
           bins: wkg, just
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: astral-sh/setup-uv@v6
       - run: just init
       - run: just test
 
@@ -81,7 +80,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: component.wasm
-          path: target/wasm32-wasip2/release/
+          path: target/wasm32-wasip3/release/
       - uses: moonrepo/setup-rust@v1
         with:
           bins: wkg, just

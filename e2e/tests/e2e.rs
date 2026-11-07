@@ -41,7 +41,7 @@ fn wasm_path() -> PathBuf {
     PathBuf::from(std::env::var("WASM").unwrap_or_else(|_| {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../target/wasm32-wasip2/release/mcp_bridge.wasm"
+            "/../target/wasm32-wasip3/release/mcp_bridge.wasm"
         )
         .into()
     }))

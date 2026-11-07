@@ -47,8 +47,9 @@ wit_bindgen::generate!({
     generate_all,
 });
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 use exports::act::sessions::session_provider as session_exports;
 use exports::act::tools::tool_provider as tool_exports;
@@ -94,17 +95,18 @@ struct Upstream {
     auth: Option<Bearer>,
 }
 
-thread_local! {
-    static SESSIONS: RefCell<HashMap<String, UpstreamSession>> = RefCell::new(HashMap::new());
-    static NEXT_ID: Cell<u64> = const { Cell::new(0) };
-}
+/// A plain `static`, not `thread_local!`: under wasip3 every host fiber gets
+/// its own TLS, so a `thread_local` session table would be repopulated from
+/// scratch on every tool call. The `Mutex` makes the table `Sync` for the
+/// `static`; a fiber can only switch at an await point, so these never-await
+/// critical sections never contend. See the `act_sdk::sessions` module docs.
+static SESSIONS: LazyLock<Mutex<HashMap<String, UpstreamSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_ID: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
 
 fn alloc_session_id() -> String {
-    NEXT_ID.with(|n| {
-        let id = n.get();
-        n.set(id + 1);
-        format!("mcp_{id}")
-    })
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed) + 1;
+    format!("mcp_{id}")
 }
 
 /// Snapshot the per-session pieces needed to dispatch a request, connecting
@@ -120,11 +122,12 @@ fn alloc_session_id() -> String {
 /// client in this workspace can currently produce — both are
 /// request/response.
 async fn ensure_upstream(session_id: &str) -> Result<(Config, Upstream), McpError> {
-    let Some((config, cached, rejected)) = SESSIONS.with(|s| {
-        s.borrow()
-            .get(session_id)
-            .map(|u| (u.config.clone(), u.upstream.clone(), u.rejected.clone()))
-    }) else {
+    let Some((config, cached, rejected)) = SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(session_id)
+        .map(|u| (u.config.clone(), u.upstream.clone(), u.rejected.clone()))
+    else {
         return Err(unknown_session(session_id));
     };
     if let Some(upstream) = cached {
@@ -144,11 +147,13 @@ async fn ensure_upstream(session_id: &str) -> Result<(Config, Upstream), McpErro
             return Err(e);
         }
     };
-    SESSIONS.with(|s| {
-        if let Some(entry) = s.borrow_mut().get_mut(session_id) {
-            entry.upstream = Some(upstream.clone());
-        }
-    });
+    if let Some(entry) = SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(session_id)
+    {
+        entry.upstream = Some(upstream.clone());
+    }
     Ok((config, upstream))
 }
 
@@ -169,11 +174,13 @@ fn note_refusal(session_id: &str, e: &McpError) {
     if !e.poisons_the_session() {
         return;
     }
-    SESSIONS.with(|s| {
-        if let Some(entry) = s.borrow_mut().get_mut(session_id) {
-            entry.rejected.get_or_insert_with(|| e.clone());
-        }
-    });
+    if let Some(entry) = SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_mut(session_id)
+    {
+        entry.rejected.get_or_insert_with(|| e.clone());
+    }
 }
 
 /// Ask the host credential store for this session's bearer token.
@@ -512,16 +519,14 @@ impl session_exports::Guest for McpBridge {
         })?;
 
         let id = alloc_session_id();
-        SESSIONS.with(|s| {
-            s.borrow_mut().insert(
-                id.clone(),
-                UpstreamSession {
-                    config,
-                    upstream: None,
-                    rejected: None,
-                },
-            );
-        });
+        SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id.clone(),
+            UpstreamSession {
+                config,
+                upstream: None,
+                rejected: None,
+            },
+        );
 
         Ok(session_exports::Session {
             id,
@@ -530,22 +535,21 @@ impl session_exports::Guest for McpBridge {
     }
 
     fn close_session(session_id: String) {
-        let session = SESSIONS.with(|s| s.borrow_mut().remove(&session_id));
+        let session = SESSIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
         // Nothing to tear down for a session that never reached the upstream:
         // no dialect was negotiated, so no upstream state exists.
-        if let Some(UpstreamSession {
-            config,
-            upstream: Some(upstream),
-            ..
-        }) = session
-        {
-            // Fire-and-forget: tell the upstream we're done (a no-op in the
-            // modern dialect, which holds no per-client state). close-session
-            // is sync per WIT, so we kick this off via wit_bindgen::spawn.
-            wit_bindgen::spawn_local(async move {
-                mcp_client::close_upstream(&config, upstream.auth.as_ref(), &upstream.dialect)
-                    .await;
-            });
-        }
+        //
+        // The upstream teardown itself is deliberately NOT sent from here.
+        // `close-session` is a synchronous WIT export, and under wasip3 a sync
+        // export carries no async task context — `wit_bindgen::spawn_local`
+        // panics outside one (wit-bindgen 0.63's `rust_spawn` hook lives only
+        // on async task vtables). The teardown is advisory: the modern dialect
+        // holds no per-client state, and a legacy server reaps abandoned
+        // `Mcp-Session-Id`s on its own, so skipping the DELETE loses nothing
+        // but a politeness DELETE that would fire after the reply anyway.
+        let _ = session;
     }
 }

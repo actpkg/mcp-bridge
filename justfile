@@ -1,4 +1,4 @@
-wasm := "target/wasm32-wasip2/release/mcp_bridge.wasm"
+wasm := "target/wasm32-wasip3/release/mcp_bridge.wasm"
 
 act := env("ACT", "npx @actcore/act")
 actbuild := env("ACT_BUILD", "npx @actcore/act-build")
@@ -74,11 +74,11 @@ test-dialects:
     done
 
 test: test-unit test-dialects
-    ACT="{{act}}" uv run --project e2e pytest e2e/ -v
+    cd e2e && ACT="{{act}}" WASM="../{{wasm}}" cargo test
 
 # Unit tests (creds.rs, mcp_client.rs, mapping.rs). The target has to be
 # named: `.cargo/config.toml` defaults every cargo invocation here to
-# wasm32-wasip2, and nothing on the host can execute a wasm test binary, so a
+# wasm32-wasip3, and nothing on the host can execute a wasm test binary, so a
 # bare `cargo test` fails at exec.
 test-unit:
     cargo test --target x86_64-unknown-linux-gnu
